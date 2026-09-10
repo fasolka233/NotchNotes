@@ -1,0 +1,45 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build",
+      "type": "shell",
+      "command": "./build.sh debug",
+      "group": { "kind": "build", "isDefault": true },
+      "presentation": { "clear": true, "reveal": "always", "panel": "shared" },
+      "problemMatcher": []
+    },
+    {
+      "label": "Build & Run",
+      "type": "shell",
+      "command": "./build.sh debug --run",
+      "presentation": { "clear": true, "reveal": "always", "panel": "shared" },
+      "problemMatcher": []
+    },
+    {
+      "label": "Release",
+      "type": "shell",
+      "command": "./build.sh release",
+      "problemMatcher": []
+    },
+    {
+      "label": "Kill",
+      "type": "shell",
+      "command": "killall NotchNotes || true",
+      "problemMatcher": []
+    },
+    {
+      "label": "Logs",
+      "type": "shell",
+      "command": "log stream --predicate 'process == \"NotchNotes\"' --level debug",
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "Install to /Applications",
+      "type": "shell",
+      "command": "./build.sh release && killall NotchNotes 2>/dev/null; rm -rf /Applications/NotchNotes.app && cp -R build/NotchNotes.app /Applications/ && open /Applications/NotchNotes.app",
+      "problemMatcher": []
+    }
+  ]
+}

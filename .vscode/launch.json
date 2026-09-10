@@ -1,0 +1,14 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug NotchNotes",
+      "program": "${workspaceFolder}/build/NotchNotes.app/Contents/MacOS/NotchNotes",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "Build"
+    }
+  ]
+}
