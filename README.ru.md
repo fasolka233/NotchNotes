@@ -46,4 +46,4 @@ swift run NotchNotes --selfcheck
 
 ## Лицензия
 
-MIT © 2026 [ProstoDev](https://github.com/ProstoDev)
+MIT © 2026 ProstoDev

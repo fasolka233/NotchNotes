@@ -46,4 +46,4 @@ Your data is stored locally under `~/Library/Application Support/NotchNotes`. Yo
 
 ## License
 
-MIT © 2026 [ProstoDev](https://github.com/ProstoDev)
+MIT © 2026 ProstoDev
