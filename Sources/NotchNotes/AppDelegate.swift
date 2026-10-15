@@ -1,22 +1,28 @@
 import AppKit
+import SwiftUI
 import ServiceManagement
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var controller: NotchController?
     private var statusItem: NSStatusItem?
-    private var hotKey: HotKey?
     private var launchItem: NSMenuItem?
+    private var settingsWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         installExceptionGuard()
 
         controller = NotchController()
+        controller?.onSettings = { [weak self] in self?.openSettings() }
         setupStatusItem()
 
-        hotKey = HotKey()                       // ⌥ + Space
-        hotKey?.onPress = { [weak self] in self?.controller?.toggle() }
+        Prefs.shared.install([
+            .toggle:  { [weak self] in self?.controller?.toggle() },
+            .capture: { [weak self] in self?.controller?.capture() }
+        ])
+        // Занятое сочетание молча не работает — тогда сразу показываем, где его поменять
+        if !Prefs.shared.problems.isEmpty { openSettings() }
 
         NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
@@ -70,6 +76,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         toggleItem.target = self
         menu.addItem(toggleItem)
 
+        let captureItem = NSMenuItem(title: "Быстрая задача…",
+                                     action: #selector(capture), keyEquivalent: "")
+        captureItem.target = self
+        menu.addItem(captureItem)
+
         let addFilesItem = NSMenuItem(title: "Добавить файлы на полку…",
                                       action: #selector(addFiles), keyEquivalent: "")
         addFilesItem.target = self
@@ -88,6 +99,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         loginItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
         menu.addItem(loginItem)
         launchItem = loginItem
+
+        let settingsItem = NSMenuItem(title: "Настройки…",
+                                      action: #selector(openSettings), keyEquivalent: ",")
+        settingsItem.target = self
+        menu.addItem(settingsItem)
 
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Выйти",
@@ -115,6 +131,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func toggle() {
         controller?.toggle()
+    }
+
+    @objc private func capture() {
+        controller?.capture()
+    }
+
+    @objc func openSettings() {
+        guard let controller else { return }
+        if settingsWindow == nil {
+            let view = SettingsView(prefs: .shared, reminders: controller.vm.reminders,
+                                    notes: controller.vm.notes)
+            let window = NSWindow(contentViewController: NSHostingController(rootView: view))
+            window.title = "Настройки NotchNotes"
+            window.styleMask = [.titled, .closable]
+            window.isReleasedWhenClosed = false
+            window.center()
+            settingsWindow = window
+        }
+        controller.close(force: true)
+        NSApp.activate(ignoringOtherApps: true)
+        settingsWindow?.makeKeyAndOrderFront(nil)
     }
 
     @objc private func addFiles() {

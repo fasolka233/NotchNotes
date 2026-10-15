@@ -9,7 +9,7 @@ struct TabBar: View {
 
     var body: some View {
         HStack(spacing: 2) {
-            ForEach(NotchTab.allCases) { tab in
+            ForEach(Array(NotchTab.allCases.enumerated()), id: \.element) { index, tab in
                 Button {
                     withAnimation(Theme.snap) { selection = tab }
                 } label: {
@@ -17,7 +17,7 @@ struct TabBar: View {
                 }
                 .buttonStyle(.plain)
                 .onHover { hovered = $0 ? tab : (hovered == tab ? nil : hovered) }
-                .help(tab.title)
+                .help("\(tab.title)  ⌘\(index + 1)")
                 .accessibilityLabel(tab.title)
             }
         }

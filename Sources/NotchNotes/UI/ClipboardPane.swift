@@ -5,6 +5,7 @@ struct ClipboardPane: View {
     @ObservedObject var store: ClipboardStore
     @State private var query = ""
     @State private var justCopied: ClipboardStore.Item.ID?
+    @FocusState private var searchFocused: Bool
 
     private var list: [ClipboardStore.Item] {
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -13,7 +14,7 @@ struct ClipboardPane: View {
 
     var body: some View {
         VStack(spacing: Theme.Space.m) {
-            SearchField(placeholder: "Поиск по буферу", text: $query) {
+            SearchField(placeholder: "Поиск по буферу  ⌘F", text: $query, focus: $searchFocused) {
                 // подпись у переключателя: без неё непонятно, что именно он делает
                 HStack(spacing: Theme.Space.s) {
                     Text(store.isEnabled ? "Запись" : "Пауза")
@@ -47,7 +48,24 @@ struct ClipboardPane: View {
                 .scrollIndicators(.hidden)
             }
         }
+        .overlay(alignment: .bottom) {
+            if let gone = store.lastRemoved {
+                UndoToast(token: gone,
+                          title: gone.count == 1 ? String(gone[0].oneLine.prefix(40))
+                                                 : "историю буфера (\(gone.count))",
+                          onUndo: { store.undoRemove() },
+                          onExpire: { if store.lastRemoved == gone { store.commitRemoval() } })
+            }
+        }
+        .animation(Theme.quick, value: store.lastRemoved)
         .foregroundStyle(Theme.Ink.primary)
+        .onAppear {
+            KeyCommand.handlers[.clipboard] = { cmd in
+                guard cmd == .find else { return false }
+                searchFocused = true
+                return true
+            }
+        }
     }
 
     private var emptyTitle: String {
@@ -128,7 +146,7 @@ struct ClipboardPane: View {
 
     private func copy(_ item: ClipboardStore.Item) {
         store.copy(item)
-        withAnimation(.spring(response: 0.25)) { justCopied = item.id }
+        withAnimation(Theme.motion(.spring(response: 0.25))) { justCopied = item.id }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) {
             withAnimation { if justCopied == item.id { justCopied = nil } }
         }

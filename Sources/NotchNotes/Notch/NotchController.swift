@@ -2,10 +2,13 @@ import AppKit
 import SwiftUI
 import Combine
 import CoreGraphics
+import Carbon.HIToolbox
 
 final class NotchController {
 
     let vm = NotchViewModel()
+    /// Шестерёнка в панели: окно настроек живёт в AppDelegate
+    var onSettings: (() -> Void)?
 
     private var panel: NotchPanel!
     private var hoverView: HoverView!
@@ -15,6 +18,7 @@ final class NotchController {
     /// Защёлка от пере-входа в `applyFrame` из прохода раскладки (см. там же)
     private var isApplyingFrame = false
     private var mouseMonitor: Any?
+    private var keyMonitor: Any?
     private var bag = Set<AnyCancellable>()
 
     private var openWork: DispatchWorkItem?
@@ -31,6 +35,7 @@ final class NotchController {
     init() {
         buildPanel()
         installMouseMonitor()
+        installKeyMonitor()
         observeKeyState()
         observeAmbient()
         observeSystemDrag()
@@ -39,7 +44,10 @@ final class NotchController {
         observeWingHover()
     }
 
-    deinit { if let m = mouseMonitor { NSEvent.removeMonitor(m) } }
+    deinit {
+        if let m = mouseMonitor { NSEvent.removeMonitor(m) }
+        if let m = keyMonitor { NSEvent.removeMonitor(m) }
+    }
 
     // MARK: - Сборка
 
@@ -77,7 +85,8 @@ final class NotchController {
         let host = NSHostingView(rootView: NotchView(
             vm: vm,
             onClose: { [weak self] in self?.close(force: true) },
-            onOpenTab: { [weak self] tab in self?.open(activate: true, tab: tab) }
+            onOpenTab: { [weak self] tab in self?.open(activate: true, tab: tab) },
+            onSettings: { [weak self] in self?.onSettings?() }
         ))
         host.translatesAutoresizingMaskIntoConstraints = false
         hoverView.addSubview(host)
@@ -115,14 +124,14 @@ final class NotchController {
             self.vm.select(.shelf)
             // Панель НЕ раскрываем: смена размера окна прямо в draggingEntered
             // роняет сессию перетаскивания. Раскроемся уже после броска.
-            withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
+            withAnimation(Theme.motion(.spring(response: 0.28, dampingFraction: 0.85))) {
                 self.vm.isDropTargeted = true
             }
         }
         catcher.onDragExit = { [weak self] in
             guard let self, self.vm.isDropTargeted || self.isDragActive else { return }
             self.isDragActive = false
-            withAnimation(.easeOut(duration: 0.16)) {
+            withAnimation(Theme.motion(.easeOut(duration: 0.16))) {
                 self.vm.isDropTargeted = false
             }
             self.vm.dragItemCount = 0
@@ -152,14 +161,14 @@ final class NotchController {
         confirmWork?.cancel()
         guard count > 0 else { return }
 
-        withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
+        withAnimation(Theme.motion(.spring(response: 0.3, dampingFraction: 0.82))) {
             vm.droppedCount += count
         }
         resizeCollapsed()
 
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
-            withAnimation(.easeOut(duration: 0.22)) { self.vm.droppedCount = 0 }
+            withAnimation(Theme.motion(.easeOut(duration: 0.22))) { self.vm.droppedCount = 0 }
             self.resizeCollapsed()
         }
         confirmWork = work
@@ -198,6 +207,46 @@ final class NotchController {
             guard let self, event.window === self.panel else { return event }
             if !self.panel.isKeyWindow { self.panel.makeKeyAndOrderFront(nil) }
             return event
+        }
+    }
+
+    private func installKeyMonitor() {
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
+            guard let self, event.window === self.panel, self.vm.isOpen else { return event }
+            return self.handleKey(event) ? nil : event
+        }
+    }
+
+    /// ⌘1–5, ⌘F, ⌘N работают всегда. Стрелки — пока не пишут многострочный текст.
+    /// Пробел и ⏎ — только когда фокуса в поле нет или поле пустое: в пустом поле
+    /// они ничего не значат, а иначе пришлось бы сначала щёлкать мимо поля.
+    /// Коды клавиш, а не символы: на русской раскладке ⌘F приходит как «⌘А».
+    private func handleKey(_ e: NSEvent) -> Bool {
+        let mods = e.modifierFlags.intersection([.command, .option, .control, .shift])
+        let code = Int(e.keyCode)
+        let send = { (c: KeyCommand) in KeyCommand.handlers[self.vm.tab]?(c) ?? false }
+
+        if mods == .command {
+            let digits = [kVK_ANSI_1, kVK_ANSI_2, kVK_ANSI_3, kVK_ANSI_4, kVK_ANSI_5]
+            if let i = digits.firstIndex(of: code), NotchTab.allCases.indices.contains(i) {
+                vm.select(NotchTab.allCases[i])
+                return true
+            }
+            if code == kVK_ANSI_F { return send(.find) }
+            if code == kVK_ANSI_N { return send(.new) }
+            return false
+        }
+        guard mods.isEmpty || mods == .shift else { return false }
+
+        let text = panel.firstResponder as? NSTextView
+        let multiline = text.map { !$0.isFieldEditor } ?? false
+        let idle = text == nil || (text!.isFieldEditor && text!.string.isEmpty)
+        switch code {
+        case kVK_UpArrow where !multiline && mods.isEmpty:   return send(.up)
+        case kVK_DownArrow where !multiline && mods.isEmpty: return send(.down)
+        case kVK_Return where idle, kVK_ANSI_KeypadEnter where idle: return send(.open)
+        case kVK_Space where idle && mods.isEmpty:          return send(.toggle)
+        default: return false
         }
     }
 
@@ -273,18 +322,23 @@ final class NotchController {
         DispatchQueue.main.asyncAfter(deadline: .now() + animDuration, execute: work)
     }
 
-    /// Сработавшее напоминание раскрывает панель на нужной заметке.
+    /// Сработавшее напоминание или клик по баннеру раскрывает панель там, куда звали.
     /// Ширину под просрочку менять здесь не нужно — за размер отвечает
     /// один общий наблюдатель `collapsedSize` в `observeAmbient()`.
     private func observeReminders() {
-        vm.reminders.$fired
+        vm.reminders.$target
             .dropFirst()                      // при старте не дёргаем панель ретроспективой
             .compactMap { $0 }
             .receive(on: RunLoop.main)
-            .sink { [weak self] note in
+            .sink { [weak self] target in
                 guard let self else { return }
-                self.vm.selectedNoteID = note.id
-                self.open(activate: true, tab: .notes)
+                switch target {
+                case .note(let id):
+                    self.vm.selectedNoteID = id
+                    self.open(activate: true, tab: .notes)
+                case .tasks:
+                    self.open(activate: true, tab: .tasks)
+                }
             }
             .store(in: &bag)
     }
@@ -313,7 +367,7 @@ final class NotchController {
         dragWatcher.onChange = { [weak self] dragging in
             guard let self else { return }
             self.openWork?.cancel()
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
+            withAnimation(Theme.motion(.spring(response: 0.3, dampingFraction: 0.82))) {
                 self.vm.isSystemDragging = dragging
             }
             if !dragging { self.vm.isDropTargeted = false }
@@ -391,7 +445,7 @@ final class NotchController {
         if activate { panel.makeKeyAndOrderFront(nil) }
 
         vm.isOpen = false
-        withAnimation(.spring(response: 0.34, dampingFraction: 0.84)) {
+        withAnimation(Theme.motion(.spring(response: 0.34, dampingFraction: 0.84))) {
             vm.isOpen = true
         }
     }
@@ -408,8 +462,9 @@ final class NotchController {
             relinquishKey()
         }
         if force { vm.isPinnedOpen = false }
+        vm.isCapturing = false
 
-        withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) {
+        withAnimation(Theme.motion(.spring(response: 0.3, dampingFraction: 0.9))) {
             vm.isOpen = false
         }
 
@@ -419,6 +474,15 @@ final class NotchController {
         }
         collapseWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + animDuration, execute: work)
+    }
+
+    /// Быстрая запись: «Задачи» с курсором в поле ввода, Enter — и панель свернулась.
+    /// Если вкладка уже на экране, фокус ставим отсюда; если только появляется —
+    /// его поставит сама панель по `isCapturing`.
+    func capture() {
+        vm.isCapturing = true
+        open(activate: true, tab: .tasks)
+        DispatchQueue.main.async { _ = KeyCommand.handlers[.tasks]?(.new) }
     }
 
     func toggle(tab: NotchTab? = nil) {

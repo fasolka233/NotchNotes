@@ -14,6 +14,9 @@ enum SelfCheck {
         checkTaskMarks()
         checkTaskEditor()
         checkReminders()
+        checkRecurrence()
+        checkBackups()
+        checkHotKeys()
         checkClipboardHeuristics()
         checkPomodoroCycle()
         checkHotZone()
@@ -277,6 +280,57 @@ enum SelfCheck {
         assert(store.lastRemoved?.title == "Отчёт")
         store.undoRemove()
         assert(store.text(for: n.id) == before && store.lastRemoved == nil, "отмена удаления")
+
+        // удалённая заметка возвращается целиком
+        store.delete(n.id)
+        assert(store.note(n.id) == nil && store.lastRemoved?.title == "Проект")
+        assert(store.undoRemove() == n.id && store.text(for: n.id) == before, "отмена удаления заметки")
+    }
+
+    /// Повтор: разбор `🔁`, быстрый ввод, следующая задача над сданной
+    private static func checkRecurrence() {
+        let day = { (s: String) in Note.isoDay.date(from: s)! }
+        let wed = day("2026-10-14")
+
+        let t = Note(text: "- [ ] Планёрка #осн 🔁 every week 📅 2026-10-20").checklist[0]
+        assert(t.text == "Планёрка" && t.fields.recur == .weekly && t.due == day("2026-10-20"))
+        assert(t.fields.line == "Планёрка #осн 🔁 every week 📅 2026-10-20", "сборка: \(t.fields.line)")
+        assert(TaskFields(parsing: "x 🔁 every 2 days").recur == Recurrence(count: 2, unit: .day))
+        assert(TaskFields(parsing: "x 🔁 every 2 days").line == "x 🔁 every 2 days")
+        assert(TaskFields(parsing: "x 🔁 иногда").text == "x 🔁 иногда", "незнакомое правило остаётся в тексте")
+
+        assert(NotesStore.normalizeTask("Отчёт !еженедельно !пт", today: wed)
+               == "Отчёт 🔁 every week ➕ 2026-10-14 📅 2026-10-16")
+
+        // сдали — над ней следующая через неделю, подзадачи остались у сданной
+        let store = scratchStore()
+        let n = store.addNote("Работа\n- [ ] Планёрка 🔁 every week 📅 2026-10-15\n  - [ ] слайды")
+        store.toggleItem(line: 1, in: n.id, today: wed)
+        let lines = store.text(for: n.id).components(separatedBy: "\n")
+        assert(lines == ["Работа",
+                         "- [ ] Планёрка 🔁 every week ➕ 2026-10-14 📅 2026-10-22",
+                         "- [x] Планёрка 🔁 every week 📅 2026-10-15 ✅ 2026-10-14",
+                         "  - [ ] слайды"], "повтор: \(lines)")
+
+        // давно просроченная ежедневная — следующая не раньше сегодня
+        let late = TaskFields(parsing: "зарядка 🔁 every day 📅 2026-09-01")
+        assert(NotesStore.nextOccurrence(late, today: wed)?.due == wed)
+        assert(NotesStore.nextOccurrence(TaskFields(parsing: "раз"), today: wed) == nil)
+    }
+
+    /// Хранится 7 свежих ежедневных копий, чужие файлы в папке не трогаем
+    private static func checkBackups() {
+        let names = (1...9).map { "notes-2026-10-0\($0).json" } + ["before-restore-1.json", ".DS_Store"]
+        assert(NotesStore.expiredBackups(names.shuffled()).sorted() == ["notes-2026-10-01.json", "notes-2026-10-02.json"])
+        assert(NotesStore.expiredBackups(["notes-2026-10-01.json"]).isEmpty)
+    }
+
+    /// Подпись сочетаний и их сохранение в настройках
+    private static func checkHotKeys() {
+        assert(HotKey.Combo.toggle.display == "⌥Space")
+        assert(HotKey.Combo.capture.display == "⌥⇧Space")
+        let data = try! JSONEncoder().encode(HotKey.Combo.capture)
+        assert(try! JSONDecoder().decode(HotKey.Combo.self, from: data) == .capture)
     }
 
     private static func checkReminders() {
@@ -290,7 +344,13 @@ enum SelfCheck {
         center.check()
         assert(store.note(note.id)?.reminderAt == nil, "сработавшее напоминание должно гаснуть")
         assert(store.note(future.id)?.reminderAt != nil, "будущее напоминание не трогаем")
-        assert(center.fired?.id == note.id, "не сообщили, по какой заметке звенело")
+        assert(center.target == .note(note.id), "не сообщили, по какой заметке звенело")
+
+        // утренняя сводка: склонения и тишина, когда делать нечего
+        assert(ReminderCenter.digestText(today: 0, overdue: 0) == nil)
+        assert(ReminderCenter.digestText(today: 1, overdue: 0) == "1 задача на сегодня")
+        assert(ReminderCenter.digestText(today: 3, overdue: 1) == "3 задачи на сегодня, из них просрочено 1")
+        assert(ReminderCenter.digestText(today: 11, overdue: 0) == "11 задач на сегодня")
     }
 
     /// Приём файлов: мишень должна вырастать заранее, а слой — принимать

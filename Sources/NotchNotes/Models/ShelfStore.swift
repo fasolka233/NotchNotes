@@ -70,8 +70,25 @@ final class ShelfStore: ObservableObject {
         return added
     }
 
-    func remove(_ id: Item.ID) { items.removeAll { $0.id == id } }
-    func clear() { items.removeAll() }
+    /// Последнее убранное с полки — для «Отменить». Сами файлы полка не трогает.
+    @Published var lastRemoved: [Item]?
+
+    func remove(_ id: Item.ID) { take { $0.id == id } }
+    func clear() { take { _ in true } }
+
+    func undoRemove() {
+        guard let back = lastRemoved else { return }
+        lastRemoved = nil
+        let present = Set(items.map(\.path))
+        items = (items + back.filter { !present.contains($0.path) }).sorted { $0.addedAt > $1.addedAt }
+    }
+
+    private func take(_ match: (Item) -> Bool) {
+        let gone = items.filter(match)
+        guard !gone.isEmpty else { return }
+        items.removeAll(where: match)
+        lastRemoved = gone
+    }
 
     /// Файл могли переместить или удалить мимо нас
     func pruneMissing() { items.removeAll { !$0.exists } }

@@ -80,6 +80,61 @@ enum TaskPriority: String, CaseIterable {
     }
 }
 
+/// Повтор в нотации Obsidian Tasks: `🔁 every week`, `🔁 every 2 days`.
+/// Сделали такую задачу — над ней появляется следующая, со сдвинутым сроком.
+struct Recurrence: Hashable {
+    enum Unit: String, CaseIterable { case day, week, month, year }
+
+    var count = 1
+    var unit: Unit
+
+    static let daily = Recurrence(unit: .day), weekly = Recurrence(unit: .week)
+    static let monthly = Recurrence(unit: .month), yearly = Recurrence(unit: .year)
+
+    var text: String { count == 1 ? "every \(unit.rawValue)" : "every \(count) \(unit.rawValue)s" }
+
+    var title: String {
+        if count == 1 {
+            switch unit {
+            case .day:   return "каждый день"
+            case .week:  return "каждую неделю"
+            case .month: return "каждый месяц"
+            case .year:  return "каждый год"
+            }
+        }
+        let short = ["day": "дн.", "week": "нед.", "month": "мес.", "year": "г."][unit.rawValue]!
+        return "раз в \(count) \(short)"
+    }
+
+    /// `!ежедневно`, `!еженедельно`… из быстрого ввода
+    init?(russian word: String) {
+        let map = ["ежедневно": Unit.day, "еженедельно": .week, "ежемесячно": .month, "ежегодно": .year]
+        guard let u = map[word.lowercased()] else { return nil }
+        unit = u
+    }
+
+    init(count: Int = 1, unit: Unit) {
+        self.count = count
+        self.unit = unit
+    }
+
+    /// `every [N] day(s)|week(s)|month(s)|year(s)` → правило и сколько слов съели
+    static func parse<S: Collection>(_ words: S) -> (Recurrence, Int)? where S.Element: StringProtocol {
+        let w = words.prefix(3).map { $0.lowercased() }
+        guard w.first == "every", w.count >= 2 else { return nil }
+        let n = Int(w[1])
+        let unitWord = n == nil ? w[1] : (w.count > 2 ? w[2] : "")
+        let bare = unitWord.hasSuffix("s") ? String(unitWord.dropLast()) : unitWord
+        guard let unit = Unit(rawValue: bare), (n ?? 1) > 0 else { return nil }
+        return (Recurrence(count: n ?? 1, unit: unit), n == nil ? 2 : 3)
+    }
+
+    func next(after date: Date) -> Date {
+        let comp: Calendar.Component = [.day: .day, .week: .weekOfYear, .month: .month, .year: .year][unit]!
+        return Calendar.current.date(byAdding: comp, value: count, to: date) ?? date
+    }
+}
+
 /// Поля задачи из строки markdown. `line` собирает их обратно —
 /// название, потом метки в порядке, который читает плагин Obsidian Tasks.
 struct TaskFields: Hashable {
@@ -87,6 +142,7 @@ struct TaskFields: Hashable {
     var kind = TaskKind.other
     var from: String?                   // от кого поручение, без «@»
     var priority = TaskPriority.none
+    var recur: Recurrence?              // 🔁
     var created: Date?                  // ➕
     var due: Date?                      // 📅 — только свой, без срока заметки
     var done: Date?                     // ✅
@@ -96,6 +152,7 @@ struct TaskFields: Hashable {
         if let tag = kind.tag { out.append(tag) }
         if let from, !from.isEmpty { out.append("@" + from) }
         if priority != .none { out.append(priority.rawValue) }
+        if let recur { out.append("🔁 " + recur.text) }
         if let created { out.append("➕ " + Note.isoDay.string(from: created)) }
         if let due { out.append("📅 " + Note.isoDay.string(from: due)) }
         if let done { out.append("✅ " + Note.isoDay.string(from: done)) }
@@ -118,6 +175,11 @@ struct TaskFields: Hashable {
             case "➕" where next != nil: created = next; i += 2; continue
             case "📅" where next != nil: due = next; i += 2; continue
             case "✅" where next != nil: done = next; i += 2; continue
+            case "🔁":
+                if let (r, used) = Recurrence.parse(tokens[(i + 1)...]) {
+                    recur = r; i += 1 + used; continue
+                }
+                kept.append(tok)
             case "⏫": priority = .high
             case "🔼": priority = .medium
             case "🔽": priority = .low

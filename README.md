@@ -7,13 +7,17 @@ A lightweight macOS menu-bar utility that lives in the notch area of your screen
 ## Features
 
 - **Notes** — quick scratchpad notes
-- **Tasks** — a simple to-do list
+- **Tasks** — to-dos in Obsidian Tasks format: due dates, priorities, subtasks, recurring tasks (`🔁 every week`, or type `!еженедельно`)
 - **Timer** — countdown/stopwatch timer
 - **Clipboard** — clipboard history
 - **Shelf** — drag & drop files to keep them close at hand (drop onto the notch panel or the menu-bar icon)
 
 Additional niceties:
-- Global hotkey **⌥ + Space** to toggle the panel
+- Global hotkey **⌥ + Space** to toggle the panel, **⌥ + ⇧ + Space** for a quick task — both configurable in Settings (⌘,)
+- Reminders and a 9:00 morning digest go to Notification Center
+- Daily backups of your notes (last 7 kept), restorable from Settings
+- Keyboard: ⌘1–5 tabs, ⌘N new, ⌘F search, ↑↓ move, ⏎ open, Space toggle task / start timer
+- Respects "Reduce motion"
 - Menu-bar icon with quick access to every tab
 - "Launch at login" toggle
 - Runs as a background accessory app (no Dock icon, no regular windows)

@@ -8,29 +8,66 @@ struct NotesPane: View {
     @State private var query = ""
     @State private var filter: NoteFilter = .all
     @State private var tag: String?
+    @FocusState private var searchFocused: Bool
+    @FocusState private var editorFocused: Bool
 
     private var list: [Note] { store.filtered(query, filter: filter, tag: tag) }
     private var selected: Note? { selectedID.flatMap(store.note) }
 
     var body: some View {
-        HStack(alignment: .top, spacing: Theme.Space.l) {
-            listColumn
-            Divider().overlay(Theme.Stroke.hairline)
-            editor
+        ZStack(alignment: .bottom) {
+            HStack(alignment: .top, spacing: Theme.Space.l) {
+                listColumn
+                Divider().overlay(Theme.Stroke.hairline)
+                editor
+            }
+
+            if let r = store.lastRemoved {
+                UndoToast(token: r, title: r.title.isEmpty ? "без названия" : r.title,
+                          onUndo: { selectedID = store.undoRemove() ?? selectedID },
+                          onExpire: { if store.lastRemoved == r { store.lastRemoved = nil } })
+            }
         }
+        .animation(Theme.quick, value: store.lastRemoved)
         .foregroundStyle(Theme.Ink.primary)
-        .onAppear { if selectedID == nil { selectedID = list.first?.id } }
+        .onAppear {
+            if selectedID == nil { selectedID = list.first?.id }
+            KeyCommand.handlers[.notes] = handle
+        }
+    }
+
+    /// ↑↓ — по списку, ⏎ — в текст заметки, ⌘N — новая, ⌘F — поиск
+    private func handle(_ cmd: KeyCommand) -> Bool {
+        switch cmd {
+        case .find: searchFocused = true
+        case .new:  newNote()
+        case .open:
+            guard selected != nil else { return false }
+            editorFocused = true
+        case .up, .down:
+            let ids = list.map(\.id)
+            guard !ids.isEmpty else { return true }
+            let i = selectedID.flatMap(ids.firstIndex(of:))
+            let next = cmd == .down ? (i.map { $0 + 1 } ?? 0) : (i.map { $0 - 1 } ?? ids.count - 1)
+            selectedID = ids[min(max(next, 0), ids.count - 1)]
+            searchFocused = false
+        case .toggle: return false
+        }
+        return true
+    }
+
+    private func newNote() {
+        selectedID = store.addNote("").id
+        DispatchQueue.main.async { editorFocused = true }
     }
 
     // MARK: - Список
 
     private var listColumn: some View {
         VStack(spacing: Theme.Space.s) {
-            SearchField(placeholder: "Поиск  ·  ⏎ создаст заметку",
-                        text: $query, onSubmit: createFromQuery) {
-                IconButton(icon: "plus", hint: "Новая заметка") {
-                    selectedID = store.addNote("").id
-                }
+            SearchField(placeholder: "Поиск ⌘F  ·  ⏎ создаст заметку",
+                        text: $query, onSubmit: createFromQuery, focus: $searchFocused) {
+                IconButton(icon: "plus", hint: "Новая заметка (⌘N)", action: newNote)
             }
 
             filterChips
@@ -185,6 +222,7 @@ struct NotesPane: View {
                     set: { store.setText($0, for: id) }
                 ))
                 .font(Theme.Font.body)
+                .focused($editorFocused)
                 .scrollContentBackground(.hidden)
                 .foregroundStyle(Theme.Ink.primary)
                 .tint(Theme.Accent.tint)
@@ -358,8 +396,8 @@ struct NotesPane: View {
                     .rowHighlight(selected: false, radius: 6)
                     .contextMenu {
                         Button("Подзадача") { store.addSubtask(after: item.line, in: note.id) }
-                        Button("Удалить строку", role: .destructive) {
-                            store.removeItem(line: item.line, in: note.id)
+                        Button("Удалить", role: .destructive) {
+                            store.removeTask(line: item.line, in: note.id)
                         }
                     }
                 }

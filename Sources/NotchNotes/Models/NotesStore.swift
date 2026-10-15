@@ -288,8 +288,11 @@ final class NotesStore: ObservableObject {
         notes[i].reminderAt = date
     }
 
+    /// Удалить заметку; вернуть можно через `undoRemove()`
     func delete(_ id: Note.ID) {
-        notes.removeAll { $0.id == id }
+        guard let i = notes.firstIndex(where: { $0.id == id }) else { return }
+        let note = notes.remove(at: i)
+        lastRemoved = Removed(title: note.title, what: .note(note, at: i))
     }
 
     @discardableResult
@@ -301,14 +304,19 @@ final class NotesStore: ObservableObject {
     // MARK: - Задачи внутри текста
 
     /// Переключить чекбокс на конкретной строке. Сделано — дописываем `✅ сегодня`,
-    /// сняли отметку — убираем дату сдачи.
-    func toggleItem(line: Int, in id: Note.ID) {
+    /// сняли отметку — убираем дату сдачи. У повторяющейся задачи над сданной
+    /// появляется следующая — как в Obsidian Tasks, подзадачи остаются у сданной.
+    func toggleItem(line: Int, in id: Note.ID, today: Date = Date()) {
         editLines(id) { lines in
             guard lines.indices.contains(line) else { return false }
             let l = lines[line]
             if let r = l.range(of: "[ ]") {
                 lines[line] = Self.stripDone(l.replacingCharacters(in: r, with: "[x]"))
-                    + " ✅ " + Note.isoDay.string(from: Date())
+                    + " ✅ " + Note.isoDay.string(from: today)
+                if let s = ChecklistItem.split(l),
+                   let next = Self.nextOccurrence(TaskFields(parsing: s.body), today: today) {
+                    lines.insert(s.prefix + next.line, at: line)
+                }
             } else if let r = l.range(of: "[x]") ?? l.range(of: "[X]") {
                 lines[line] = Self.stripDone(l.replacingCharacters(in: r, with: "[ ]"))
             } else {
@@ -316,6 +324,21 @@ final class NotesStore: ObservableObject {
             }
             return true
         }
+    }
+
+    /// Следующий экземпляр повторяющейся задачи. Срок считаем от прежнего срока
+    /// (или от сегодня, если его не было) и не оставляем в прошлом:
+    /// пропущенную ежедневную задачу незачем сразу заводить просроченной.
+    static func nextOccurrence(_ f: TaskFields, today: Date) -> TaskFields? {
+        guard let recur = f.recur else { return nil }
+        let start = Calendar.current.startOfDay(for: today)
+        var due = recur.next(after: f.due ?? start)
+        while due < start { due = recur.next(after: due) }
+        var next = f
+        next.created = start
+        next.due = due
+        next.done = nil
+        return next
     }
 
     private static func stripDone(_ line: String) -> String {
@@ -344,15 +367,17 @@ final class NotesStore: ObservableObject {
         }
     }
 
-    /// Удалённая задача с подзадачами — для «Отменить»
-    struct RemovedTask: Equatable {
-        let note: Note.ID
-        let line: Int
-        let lines: [String]
+    /// Последнее удалённое — заметка целиком или задача с подзадачами — для «Отменить»
+    struct Removed: Equatable {
+        enum What: Equatable {
+            case lines(note: Note.ID, at: Int, [String])
+            case note(Note, at: Int)
+        }
         let title: String
+        let what: What
     }
 
-    @Published var lastRemoved: RemovedTask?
+    @Published var lastRemoved: Removed?
 
     /// Удалить задачу вместе с подзадачами; вернуть можно через `undoRemove()`
     func removeTask(line: Int, in id: Note.ID) {
@@ -360,18 +385,28 @@ final class NotesStore: ObservableObject {
             guard lines.indices.contains(line) else { return false }
             let range = line...Self.blockEnd(lines, line)
             let title = ChecklistItem.split(lines[line]).map { TaskFields(parsing: $0.body).text } ?? ""
-            lastRemoved = RemovedTask(note: id, line: line, lines: Array(lines[range]), title: title)
+            lastRemoved = Removed(title: title, what: .lines(note: id, at: line, Array(lines[range])))
             lines.removeSubrange(range)
             return true
         }
     }
 
-    func undoRemove() {
-        guard let r = lastRemoved else { return }
+    /// Вернуть последнее удалённое. Возвращает заметку, в которую оно вернулось.
+    @discardableResult
+    func undoRemove() -> Note.ID? {
+        guard let r = lastRemoved else { return nil }
         lastRemoved = nil
-        editLines(r.note) { lines in
-            lines.insert(contentsOf: r.lines, at: min(r.line, lines.count))
-            return true
+        switch r.what {
+        case let .lines(id, at, removed):
+            editLines(id) { lines in
+                lines.insert(contentsOf: removed, at: min(at, lines.count))
+                return true
+            }
+            return id
+        case let .note(note, at):
+            guard !notes.contains(where: { $0.id == note.id }) else { return note.id }
+            notes.insert(note, at: min(at, notes.count))
+            return note.id
         }
     }
 
@@ -427,6 +462,7 @@ final class NotesStore: ObservableObject {
 
     /// `Отчёт #осн @руководитель 📅 20.10 !пт` → `Отчёт #осн @руководитель ➕ 2026-10-15 📅 2026-10-17`.
     /// Короткие сроки: `📅 20.10`, `📅 20.10.2026`, `!сегодня`, `!завтра`, `!пн`…`!вс`, `!20.10`.
+    /// Повтор: `!ежедневно`, `!еженедельно`, `!ежемесячно`, `!ежегодно` → `🔁 every week`.
     /// Поля с эмодзи уходят в конец — так их читает плагин Obsidian Tasks.
     static func normalizeTask(_ raw: String, today: Date = Date()) -> String {
         let cal = Calendar.current
@@ -439,6 +475,8 @@ final class NotesStore: ObservableObject {
         while i < tokens.count {
             if tokens[i].hasPrefix("!"), let d = shortDate(String(tokens[i].dropFirst()), from: start) {
                 tokens[i...i] = ["📅", Note.isoDay.string(from: d)]
+            } else if tokens[i].hasPrefix("!"), let r = Recurrence(russian: String(tokens[i].dropFirst())) {
+                tokens[i...i] = ["🔁"] + r.text.split(separator: " ").map(String.init)
             } else if tokens[i] == "📅", i + 1 < tokens.count,
                       Note.isoDay.date(from: tokens[i + 1]) == nil,
                       let d = shortDate(tokens[i + 1], from: start) {
@@ -575,14 +613,64 @@ final class NotesStore: ObservableObject {
     // MARK: - Диск
 
     private func load() {
-        guard let data = try? Data(contentsOf: fileURL),
-              let decoded = try? JSONDecoder().decode([Note].self, from: data)
-        else { return }
-        notes = decoded
+        guard let data = try? Data(contentsOf: fileURL) else { return }
+        do {
+            notes = try JSONDecoder().decode([Note].self, from: data)
+        } catch {
+            // Нечитаемый файл нельзя молча затереть пустым списком при первом
+            // же сохранении — откладываем его в сторону, его ещё можно спасти.
+            let aside = fileURL.deletingLastPathComponent()
+                .appendingPathComponent("notes.unreadable-\(Int(Date().timeIntervalSince1970)).json")
+            try? FileManager.default.moveItem(at: fileURL, to: aside)
+            NSLog("[NotchNotes] notes.json не прочитан (\(error)), отложен в \(aside.lastPathComponent)")
+        }
     }
 
     private func save(_ notes: [Note]) {
         guard let data = try? JSONEncoder().encode(notes) else { return }
+        backupIfNeeded()
         try? data.write(to: fileURL, options: .atomic)
+    }
+
+    // MARK: - Резервные копии
+
+    var backupDirectory: URL {
+        fileURL.deletingLastPathComponent().appendingPathComponent("backups", isDirectory: true)
+    }
+
+    /// Раз в день, перед первой записью, — копия того, что было на диске.
+    /// Храним неделю: хватает, чтобы откатить неудачную правку или случайное удаление.
+    private func backupIfNeeded() {
+        let fm = FileManager.default
+        let today = backupDirectory.appendingPathComponent("notes-\(Note.isoDay.string(from: Date())).json")
+        guard fm.fileExists(atPath: fileURL.path), !fm.fileExists(atPath: today.path) else { return }
+        try? fm.createDirectory(at: backupDirectory, withIntermediateDirectories: true)
+        try? fm.copyItem(at: fileURL, to: today)
+        let names = (try? fm.contentsOfDirectory(atPath: backupDirectory.path)) ?? []
+        for name in Self.expiredBackups(names) {
+            try? fm.removeItem(at: backupDirectory.appendingPathComponent(name))
+        }
+    }
+
+    /// Ежедневные копии сверх `keep` самых свежих. Имена `notes-ГГГГ-ММ-ДД.json`
+    /// сортируются по алфавиту ровно как по дате.
+    static func expiredBackups(_ names: [String], keep: Int = 7) -> [String] {
+        let daily = names.filter { $0.hasPrefix("notes-") && $0.hasSuffix(".json") }.sorted(by: >)
+        return Array(daily.dropFirst(keep))
+    }
+
+    /// Заменить заметки копией. Текущие сначала откладываем рядом —
+    /// восстановление тоже должно быть обратимым.
+    @discardableResult
+    func restore(from url: URL) -> Bool {
+        guard let data = try? Data(contentsOf: url),
+              let decoded = try? JSONDecoder().decode([Note].self, from: data) else { return false }
+        if let current = try? JSONEncoder().encode(notes) {
+            try? FileManager.default.createDirectory(at: backupDirectory, withIntermediateDirectories: true)
+            let stamp = Int(Date().timeIntervalSince1970)
+            try? current.write(to: backupDirectory.appendingPathComponent("before-restore-\(stamp).json"))
+        }
+        notes = decoded
+        return true
     }
 }

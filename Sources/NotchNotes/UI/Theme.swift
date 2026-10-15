@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 /// Единственный источник правды для цвета, типографики и метрик.
 /// Все вью берут значения отсюда — руками `Color.white.opacity(...)` больше не пишем.
@@ -97,8 +98,13 @@ enum Theme {
     }
 
     /// Одна анимация на все состояния наведения/выбора — интерфейс ощущается цельным.
-    static let quick = Animation.easeOut(duration: 0.13)
-    static let snap  = Animation.spring(response: 0.28, dampingFraction: 0.82)
+    static var quick: Animation? { motion(.easeOut(duration: 0.13)) }
+    static var snap: Animation?  { motion(.spring(response: 0.28, dampingFraction: 0.82)) }
+
+    /// «Уменьшить движение» в Универсальном доступе: состояние меняется сразу,
+    /// без пружин. Читаем каждый раз — настройку могут переключить на ходу.
+    static var reduceMotion: Bool { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
+    static func motion(_ animation: Animation) -> Animation? { reduceMotion ? nil : animation }
 }
 
 // MARK: - Общие модификаторы
@@ -250,12 +256,47 @@ struct EmptyState: View {
     }
 }
 
+/// «Удалено «…» · Отменить» внизу панели, ⌘Z. Через 5 секунд прячется сам —
+/// `onExpire` вызывается, только если плашку не сменила новая (`token` тот же).
+struct UndoToast<Token: Equatable>: View {
+    let token: Token
+    let title: String
+    let onUndo: () -> Void
+    let onExpire: () -> Void
+
+    var body: some View {
+        HStack(spacing: Theme.Space.m) {
+            Image(systemName: "trash").font(Theme.Icon.small)
+            Text("Удалено «\(title)»")
+                .font(Theme.Font.caption)
+                .lineLimit(1)
+            Button("Отменить", action: onUndo)
+                .buttonStyle(.plain)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Theme.Accent.tint)
+                .keyboardShortcut("z", modifiers: .command)
+        }
+        .padding(.horizontal, 14).padding(.vertical, 7)
+        .background(Color(white: 0.16), in: Capsule())
+        .overlay(Capsule().strokeBorder(Theme.Stroke.outline, lineWidth: 1))
+        .shadow(color: .black.opacity(0.4), radius: 10, y: 3)
+        .padding(.bottom, 22)
+        .transition(.move(edge: .bottom).combined(with: .opacity))
+        .task(id: token) {
+            try? await Task.sleep(for: .seconds(5))
+            if !Task.isCancelled { onExpire() }
+        }
+    }
+}
+
 /// Поле поиска/ввода одного вида во всех панелях.
 struct SearchField<Trailing: View>: View {
     let placeholder: String
     @Binding var text: String
     var icon: String = "magnifyingglass"
     var onSubmit: (() -> Void)? = nil
+    /// Чтобы ⌘F / ⌘N могли поставить курсор в поле
+    var focus: FocusState<Bool>.Binding? = nil
     @ViewBuilder var trailing: () -> Trailing
 
     var body: some View {
@@ -264,11 +305,11 @@ struct SearchField<Trailing: View>: View {
                 .font(Theme.Icon.small)
                 .foregroundStyle(Theme.Ink.tertiary)
 
-            TextField(placeholder, text: $text)
-                .textFieldStyle(.plain)
-                .font(Theme.Font.caption)
-                .foregroundStyle(Theme.Ink.primary)
-                .onSubmit { onSubmit?() }
+            if let focus {
+                field.focused(focus)
+            } else {
+                field
+            }
 
             trailing()
         }
@@ -277,13 +318,22 @@ struct SearchField<Trailing: View>: View {
         .background(Theme.Surface.field, in: Capsule())
         .overlay(Capsule().strokeBorder(Theme.Stroke.hairline, lineWidth: 1))
     }
+
+    private var field: some View {
+        TextField(placeholder, text: $text)
+            .textFieldStyle(.plain)
+            .font(Theme.Font.caption)
+            .foregroundStyle(Theme.Ink.primary)
+            .onSubmit { onSubmit?() }
+    }
 }
 
 extension SearchField where Trailing == EmptyView {
     init(placeholder: String, text: Binding<String>,
-         icon: String = "magnifyingglass", onSubmit: (() -> Void)? = nil) {
+         icon: String = "magnifyingglass", onSubmit: (() -> Void)? = nil,
+         focus: FocusState<Bool>.Binding? = nil) {
         self.init(placeholder: placeholder, text: text,
-                  icon: icon, onSubmit: onSubmit) { EmptyView() }
+                  icon: icon, onSubmit: onSubmit, focus: focus) { EmptyView() }
     }
 }
 

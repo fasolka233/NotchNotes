@@ -27,6 +27,15 @@ enum NotchTab: String, CaseIterable, Identifiable {
     }
 }
 
+/// Клавиши раскрытой панели. Ловит `NotchController` (монитор keyDown),
+/// обрабатывает панель текущей вкладки — она же говорит, съела ли нажатие.
+enum KeyCommand {
+    case find, new, up, down, open, toggle
+
+    /// ponytail: по обработчику на вкладку, глобально — панель в приложении одна
+    static var handlers: [NotchTab: (KeyCommand) -> Bool] = [:]
+}
+
 final class NotchViewModel: ObservableObject {
 
     @Published var isOpen = false
@@ -42,6 +51,8 @@ final class NotchViewModel: ObservableObject {
     @Published var notchSize = CGSize(width: 220, height: 32)
     /// Общая для «Заметок» и «Задач»: из задачи можно прыгнуть в её заметку
     @Published var selectedNoteID: Note.ID?
+    /// Панель открыта быстрой записью: после Enter она сама свернётся
+    @Published var isCapturing = false
 
     let notes = NotesStore()
     let clipboard = ClipboardStore()
@@ -121,10 +132,10 @@ final class NotchViewModel: ObservableObject {
     /// Показать вспышку в правом крыле и убрать её через 1.6 с
     func showFlash(_ f: Flash) {
         flashWork?.cancel()
-        withAnimation(.spring(response: 0.26, dampingFraction: 0.8)) { flash = f }
+        withAnimation(Theme.motion(.spring(response: 0.26, dampingFraction: 0.8))) { flash = f }
 
         let work = DispatchWorkItem { [weak self] in
-            withAnimation(.easeOut(duration: 0.22)) { self?.flash = nil }
+            withAnimation(Theme.motion(.easeOut(duration: 0.22))) { self?.flash = nil }
         }
         flashWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.6, execute: work)
@@ -285,7 +296,7 @@ final class NotchViewModel: ObservableObject {
     }
 
     func select(_ newTab: NotchTab) {
-        withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) { tab = newTab }
+        withAnimation(Theme.motion(.spring(response: 0.28, dampingFraction: 0.85))) { tab = newTab }
     }
 
     /// Открыть заметку во вкладке «Заметки» — из списка задач или напоминания

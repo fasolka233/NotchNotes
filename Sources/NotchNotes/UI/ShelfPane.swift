@@ -69,6 +69,15 @@ struct ShelfPane: View {
             }
             .animation(Theme.quick, value: isTargeted)
         }
+        .overlay(alignment: .bottom) {
+            if let gone = store.lastRemoved {
+                UndoToast(token: gone,
+                          title: gone.count == 1 ? gone[0].name : "\(gone.count) \(filesWord(gone.count))",
+                          onUndo: { store.undoRemove() },
+                          onExpire: { if store.lastRemoved == gone { store.lastRemoved = nil } })
+            }
+        }
+        .animation(Theme.quick, value: store.lastRemoved)
         .foregroundStyle(Theme.Ink.primary)
         .onAppear { store.pruneMissing() }
         .onDrop(of: [.fileURL], isTargeted: $isTargeted) { providers in

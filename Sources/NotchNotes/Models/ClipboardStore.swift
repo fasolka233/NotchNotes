@@ -73,6 +73,7 @@ final class ClipboardStore: ObservableObject {
         if let data = try? Data(contentsOf: fileURL),
            let decoded = try? JSONDecoder().decode([Item].self, from: data) {
             items = decoded
+            sweepOrphanImages()
         }
 
         $items
@@ -219,14 +220,42 @@ final class ClipboardStore: ObservableObject {
         items[i].isPinned.toggle()
     }
 
-    func delete(_ id: Item.ID) {
-        discardFiles(items.filter { $0.id == id })
-        items.removeAll { $0.id == id }
+    /// Последнее удалённое — для «Отменить». Картинки этих записей лежат на диске,
+    /// пока не вызван `commitRemoval()` или не удалили что-то новое.
+    @Published var lastRemoved: [Item]?
+
+    func delete(_ id: Item.ID) { take { $0.id == id } }
+    func clearUnpinned() { take { !$0.isPinned } }
+
+    func undoRemove() {
+        guard let back = lastRemoved else { return }
+        lastRemoved = nil
+        items.append(contentsOf: back)
+        trim()
     }
 
-    func clearUnpinned() {
-        discardFiles(items.filter { !$0.isPinned })
-        items.removeAll { !$0.isPinned }
+    /// Отмена больше не нужна — теперь можно стереть картинки
+    func commitRemoval() {
+        guard let gone = lastRemoved else { return }
+        lastRemoved = nil
+        discardFiles(gone)
+    }
+
+    private func take(_ match: (Item) -> Bool) {
+        let gone = items.filter(match)
+        guard !gone.isEmpty else { return }
+        commitRemoval()
+        items.removeAll(where: match)
+        lastRemoved = gone
+    }
+
+    /// Картинки, на которые никто не ссылается: приложение закрыли, пока висела «Отменить»
+    private func sweepOrphanImages() {
+        let used = Set(items.compactMap(\.imageFile))
+        let files = (try? FileManager.default.contentsOfDirectory(atPath: imagesDir.path)) ?? []
+        for name in files where !used.contains(name) {
+            try? FileManager.default.removeItem(at: imagesDir.appendingPathComponent(name))
+        }
     }
 
     /// Перетаскивание элемента из истории в другое приложение

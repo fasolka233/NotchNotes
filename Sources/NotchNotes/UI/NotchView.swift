@@ -5,6 +5,7 @@ struct NotchView: View {
     var onClose: () -> Void
     /// Клик по крылу свёрнутой челки — сразу нужная вкладка, без промежуточного шага
     var onOpenTab: (NotchTab) -> Void = { _ in }
+    var onSettings: () -> Void = {}
 
     private var shapeSize: CGSize { vm.isOpen ? vm.contentSize : vm.collapsedSize }
 
@@ -51,8 +52,8 @@ struct NotchView: View {
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .animation(.spring(response: 0.34, dampingFraction: 0.84), value: vm.isOpen)
-        .animation(.spring(response: 0.3, dampingFraction: 0.8), value: vm.collapsedSize)
+        .animation(Theme.motion(.spring(response: 0.34, dampingFraction: 0.84)), value: vm.isOpen)
+        .animation(Theme.motion(.spring(response: 0.3, dampingFraction: 0.8)), value: vm.collapsedSize)
     }
 
     // MARK: - Свёрнутое состояние (ambient)
@@ -92,7 +93,7 @@ struct NotchView: View {
         .padding(.horizontal, 9)
         .frame(height: vm.notchSize.height)
         .frame(maxHeight: .infinity, alignment: .top)
-        .animation(.easeOut(duration: 0.15), value: vm.isDropTargeted)
+        .animation(Theme.motion(.easeOut(duration: 0.15)), value: vm.isDropTargeted)
     }
 
     /// В крыло по 60 пт помещается только короткая подпись — иначе она
@@ -223,6 +224,8 @@ struct NotchView: View {
                            tint: vm.isPinnedOpen ? Theme.Accent.pin : Theme.Ink.secondary,
                            hint: "Закрепить открытой") { vm.isPinnedOpen.toggle() }
 
+                IconButton(icon: "gearshape", hint: "Настройки (⌘,)", action: onSettings)
+
                 IconButton(icon: "xmark", hint: "Закрыть (Esc)", action: onClose)
             }
             .padding(.trailing, 10)
@@ -234,7 +237,10 @@ struct NotchView: View {
     private var pane: some View {
         switch vm.tab {
         case .notes:     NotesPane(store: vm.notes, selectedID: $vm.selectedNoteID)
-        case .tasks:     TasksPane(store: vm.notes) { vm.reveal($0) }
+        case .tasks:
+            TasksPane(store: vm.notes, onReveal: { vm.reveal($0) },
+                      autoFocusDraft: vm.isCapturing,
+                      onAdded: { if vm.isCapturing { onClose() } })
         case .clipboard: ClipboardPane(store: vm.clipboard)
         case .timer:     TimerPane(timer: vm.timer)
         case .shelf:     ShelfPane(store: vm.shelf, isTargeted: $vm.isDropTargeted)

@@ -6,6 +6,10 @@ import AppKit
 struct TasksPane: View {
     @ObservedObject var store: NotesStore
     var onReveal: (Note.ID) -> Void
+    /// Открыты быстрой записью — сразу курсор в поле новой задачи
+    var autoFocusDraft = false
+    /// Задачу добавили из поля быстрого ввода
+    var onAdded: () -> Void = {}
 
     @State private var scope: TaskScope = .open
     @State private var kind: TaskKind? = nil
@@ -14,6 +18,10 @@ struct TasksPane: View {
     @State private var draft = ""
     @State private var collapsed: Set<String> = []
     @State private var editing: TaskRef?
+    /// Строка под клавиатурой: ↑↓ двигают, пробел отмечает, ⏎ открывает
+    @State private var selected: TaskRef?
+    @FocusState private var draftFocused: Bool
+    @FocusState private var searchFocused: Bool
 
     var body: some View {
         let entries = store.tasks(scope, kind: kind, from: author, query: query)
@@ -30,15 +38,21 @@ struct TasksPane: View {
                                     ? "Пример: Отчёт #осн @руководитель !пт"
                                     : nil)
                 } else {
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 1) {
-                            ForEach(entries) { group($0) }
+                    ScrollViewReader { proxy in
+                        ScrollView {
+                            LazyVStack(alignment: .leading, spacing: 1) {
+                                ForEach(entries) { group($0) }
+                            }
+                            .padding(4)
+                            .background(Theme.Surface.base,
+                                        in: RoundedRectangle(cornerRadius: Theme.Radius.card))
                         }
-                        .padding(4)
-                        .background(Theme.Surface.base,
-                                    in: RoundedRectangle(cornerRadius: Theme.Radius.card))
+                        .scrollIndicators(.hidden)
+                        .onChange(of: selected) { _, ref in
+                            guard let ref else { return }
+                            withAnimation(Theme.quick) { proxy.scrollTo(rowID(ref)) }
+                        }
                     }
-                    .scrollIndicators(.hidden)
                 }
 
                 Text(store.taskSummary(kind: kind, from: author))
@@ -58,12 +72,55 @@ struct TasksPane: View {
                     .transition(.scale(scale: 0.97).combined(with: .opacity))
             }
 
-            if let removed = store.lastRemoved { undoToast(removed) }
+            if let r = store.lastRemoved {
+                UndoToast(token: r, title: r.title.isEmpty ? "задача" : r.title,
+                          onUndo: { store.undoRemove() },
+                          onExpire: { if store.lastRemoved == r { store.lastRemoved = nil } })
+            }
         }
         .animation(Theme.snap, value: editing)
         .animation(Theme.quick, value: store.lastRemoved)
         .foregroundStyle(Theme.Ink.primary)
+        .onAppear {
+            KeyCommand.handlers[.tasks] = handle
+            // в только что появившейся панели фокус встаёт со следующего прохода
+            if autoFocusDraft { DispatchQueue.main.async { draftFocused = true } }
+        }
     }
+
+    // MARK: - Клавиатура
+
+    /// Строки ровно в том порядке, в каком их видно: свёрнутые подзадачи пропускаем
+    private var visibleRows: [TaskRef] {
+        store.tasks(scope, kind: kind, from: author, query: query).flatMap { e in
+            ([e.item] + (collapsed.contains(e.id) ? [] : e.children))
+                .map { TaskRef(note: e.note.id, line: $0.line) }
+        }
+    }
+
+    private func handle(_ cmd: KeyCommand) -> Bool {
+        guard editing == nil else { return false }   // в редакторе клавиши его
+        switch cmd {
+        case .find: searchFocused = true
+        case .new:  draftFocused = true
+        case .up, .down:
+            let rows = visibleRows
+            guard !rows.isEmpty else { return true }
+            let i = selected.flatMap(rows.firstIndex(of:))
+            let next = cmd == .down ? (i.map { $0 + 1 } ?? 0) : (i.map { $0 - 1 } ?? rows.count - 1)
+            selected = rows[min(max(next, 0), rows.count - 1)]
+            draftFocused = false; searchFocused = false
+        case .open:
+            guard let selected, visibleRows.contains(selected) else { return false }
+            editing = selected
+        case .toggle:
+            guard let selected, visibleRows.contains(selected) else { return false }
+            store.toggleItem(line: selected.line, in: selected.note)
+        }
+        return true
+    }
+
+    private func rowID(_ ref: TaskRef) -> String { "\(ref.note)-\(ref.line)" }
 
     private var emptyTitle: String {
         if !query.isEmpty || author != nil { return "Ничего не нашлось" }
@@ -95,10 +152,10 @@ struct TasksPane: View {
 
             Spacer(minLength: Theme.Space.xs)
 
-            SearchField(placeholder: "Новая задача #осн @кто !пт",
-                        text: $draft, icon: "plus.circle", onSubmit: quickAdd)
+            SearchField(placeholder: "Новая задача #осн @кто !пт  ⌘N",
+                        text: $draft, icon: "plus.circle", onSubmit: quickAdd, focus: $draftFocused)
                 .frame(width: 230)
-                .help("Попадёт во «Входящие». Метки: #осн / #доп, @от кого, ⏫ 🔼 🔽, срок: 📅 20.10, !завтра, !пт")
+                .help("Попадёт во «Входящие». Метки: #осн / #доп, @от кого, ⏫ 🔼 🔽, срок: 📅 20.10, !завтра, !пт, повтор: !еженедельно")
 
             IconButton(icon: "square.and.arrow.up", hint: "Экспорт задач в CSV") {
                 store.exportTasksCSV()
@@ -132,7 +189,7 @@ struct TasksPane: View {
                     .help("Подставить")
                 }
             } else if parsed.text.isEmpty {
-                Text("Метки: #осн #доп · @кто · ⏫ 🔼 🔽 · 📅 20.10 · !завтра · !пт")
+                Text("Метки: #осн #доп · @кто · ⏫ 🔼 🔽 · 📅 20.10 · !завтра · !пт · !еженедельно")
                     .font(Theme.Font.caption)
                     .foregroundStyle(Theme.Ink.tertiary)
             } else {
@@ -141,6 +198,7 @@ struct TasksPane: View {
                 if let from = parsed.from { tag("@" + from) }
                 if parsed.priority != .none { tag("приоритет " + parsed.priority.title) }
                 if let due = parsed.due { tag("срок " + Note.dayLabel(due)) }
+                if let recur = parsed.recur { tag("повтор " + recur.title) }
                 Text("Enter — добавить")
                     .font(Theme.Font.caption)
                     .foregroundStyle(Theme.Ink.tertiary)
@@ -182,7 +240,7 @@ struct TasksPane: View {
 
             Spacer(minLength: Theme.Space.xs)
 
-            SearchField(placeholder: "Поиск по задачам", text: $query) {
+            SearchField(placeholder: "Поиск по задачам  ⌘F", text: $query, focus: $searchFocused) {
                 if !query.isEmpty {
                     Button { query = "" } label: {
                         Image(systemName: "xmark.circle.fill").font(Theme.Icon.small)
@@ -202,6 +260,7 @@ struct TasksPane: View {
     private func group(_ e: TaskEntry) -> some View {
         let open = !collapsed.contains(e.id)
         TaskRow(store: store, note: e.note, item: e.item,
+                isSelected: selected == TaskRef(note: e.note.id, line: e.item.line),
                 showKind: kind == nil,
                 progress: e.children.isEmpty ? nil : e.progress,
                 expanded: e.children.isEmpty ? nil : open,
@@ -216,35 +275,12 @@ struct TasksPane: View {
         if open {
             ForEach(e.children) { child in
                 TaskRow(store: store, note: e.note, item: child,
+                        isSelected: selected == TaskRef(note: e.note.id, line: child.line),
                         indent: child.depth - e.item.depth,
                         showKind: false,
                         onEdit: { editing = TaskRef(note: e.note.id, line: $0) },
                         onReveal: onReveal)
             }
-        }
-    }
-
-    private func undoToast(_ r: NotesStore.RemovedTask) -> some View {
-        HStack(spacing: Theme.Space.m) {
-            Image(systemName: "trash").font(Theme.Icon.small)
-            Text("Удалено «\(r.title.isEmpty ? "задача" : r.title)»")
-                .font(Theme.Font.caption)
-                .lineLimit(1)
-            Button("Отменить") { store.undoRemove() }
-                .buttonStyle(.plain)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(Theme.Accent.tint)
-                .keyboardShortcut("z", modifiers: .command)
-        }
-        .padding(.horizontal, 14).padding(.vertical, 7)
-        .background(Color(white: 0.16), in: Capsule())
-        .overlay(Capsule().strokeBorder(Theme.Stroke.outline, lineWidth: 1))
-        .shadow(color: .black.opacity(0.4), radius: 10, y: 3)
-        .padding(.bottom, 22)
-        .transition(.move(edge: .bottom).combined(with: .opacity))
-        .task(id: r) {
-            try? await Task.sleep(for: .seconds(5))
-            if store.lastRemoved == r { store.lastRemoved = nil }
         }
     }
 
@@ -260,6 +296,7 @@ struct TasksPane: View {
         guard !text.isEmpty else { return }
         store.addTask(text, to: store.inbox().id)
         draft = ""
+        onAdded()
     }
 }
 
@@ -269,6 +306,7 @@ private struct TaskRow: View {
     @ObservedObject var store: NotesStore
     let note: Note
     let item: ChecklistItem
+    var isSelected = false
     var indent = 0
     var showKind = true
     var progress: (done: Int, total: Int)? = nil
@@ -354,6 +392,14 @@ private struct TaskRow: View {
                     .help("От кого")
             }
 
+            if let recur = t.fields.recur {
+                Image(systemName: "repeat")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Theme.Ink.tertiary)
+                    .help("Повтор: \(recur.title)")
+                    .accessibilityLabel("Повтор: \(recur.title)")
+            }
+
             if t.isDone {
                 doneLabel(t)
             } else if let due = t.due {
@@ -368,8 +414,9 @@ private struct TaskRow: View {
         }
         .padding(.leading, 4 + CGFloat(indent) * 20).padding(.trailing, 6)
         .padding(.vertical, 3)
-        .rowHighlight(selected: false, radius: 6)
+        .rowHighlight(selected: isSelected, radius: 6)
         .contentShape(Rectangle())
+        .id("\(note.id)-\(t.line)")
         .onTapGesture { onEdit(t.line) }
         .onHover { hovering = $0 }
         .contextMenu {

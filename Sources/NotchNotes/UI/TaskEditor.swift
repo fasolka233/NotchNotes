@@ -170,6 +170,13 @@ struct TaskEditor: View {
                 }
             }
 
+            row("Повтор") {
+                PillPicker(options: [(Recurrence?.none, "—"), (.daily, "День"), (.weekly, "Неделя"),
+                                     (.monthly, "Месяц"), (.yearly, "Год")],
+                           selection: binding(\.recur, default: nil))
+                    .help("Сделали — появится следующая с новым сроком")
+            }
+
             row("Получено") {
                 HStack(spacing: 4) {
                     if item.createdAt != nil {

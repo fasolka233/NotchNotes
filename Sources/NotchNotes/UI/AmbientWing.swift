@@ -33,7 +33,7 @@ struct AmbientWing<Content: View>: View {
             .contentShape(Rectangle())
             .onHover { hovering in
                 guard !isEmpty else { return }
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
+                withAnimation(Theme.motion(.spring(response: 0.3, dampingFraction: 0.82))) {
                     vm.hoveredWing = hovering ? side : (vm.hoveredWing == side ? nil : vm.hoveredWing)
                 }
             }
@@ -44,7 +44,7 @@ struct AmbientWing<Content: View>: View {
             .accessibilityElement(children: .combine)
             .accessibilityAddTraits(.isButton)
             .allowsHitTesting(!isEmpty)
-            .animation(.spring(response: 0.3, dampingFraction: 0.82), value: vm.wingWidth)
+            .animation(Theme.motion(.spring(response: 0.3, dampingFraction: 0.82)), value: vm.wingWidth)
     }
 }
 
@@ -100,8 +100,10 @@ struct AmbientBadge: View {
     }
 
     private func startPulse() {
-        guard pulses else {
-            withAnimation(.easeOut(duration: 0.2)) { pulse = false }
+        // без движения пульс превратился бы в застывшую полупрозрачность —
+        // смысл тогда несёт только цвет и подпись
+        guard pulses, !Theme.reduceMotion else {
+            withAnimation(Theme.motion(.easeOut(duration: 0.2))) { pulse = false }
             return
         }
         withAnimation(.easeInOut(duration: 1.1).repeatForever(autoreverses: true)) {

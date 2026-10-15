@@ -10,6 +10,14 @@ struct TimerPane: View {
         }
         .foregroundStyle(Theme.Ink.primary)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onAppear {
+            // пробел — старт/пауза, как в любом плеере
+            KeyCommand.handlers[.timer] = { [timer] cmd in
+                guard cmd == .toggle || cmd == .open else { return false }
+                timer.toggle()
+                return true
+            }
+        }
     }
 
     private var dialColor: Color {
@@ -27,7 +35,7 @@ struct TimerPane: View {
                 .trim(from: 0, to: timer.progress)
                 .stroke(dialColor, style: StrokeStyle(lineWidth: 10, lineCap: .round))
                 .rotationEffect(.degrees(-90))
-                .animation(.linear(duration: 0.25), value: timer.progress)
+                .animation(Theme.motion(.linear(duration: 0.25)), value: timer.progress)
 
             VStack(spacing: 3) {
                 Text(timer.formatted)
