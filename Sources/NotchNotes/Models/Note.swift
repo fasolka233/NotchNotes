@@ -80,50 +80,32 @@ enum TaskPriority: String, CaseIterable {
     }
 }
 
-/// Пункт чек-листа. Живёт прямо в тексте заметки — отдельной модели нет,
-/// поэтому заметка остаётся обычным markdown и без потерь уезжает в Obsidian.
-/// Служебные метки (формат Obsidian Tasks) разбираются из той же строки:
-/// `- [ ] Отчёт #осн @руководитель 🔼 ➕ 2026-10-15 📅 2026-10-20`
-struct ChecklistItem: Identifiable, Hashable {
-    let line: Int          // индекс строки в тексте заметки
-    let text: String       // название без служебных меток
-    let isDone: Bool
-    let depth: Int         // 0 — задача, 1+ — подзадача (по отступу)
+/// Поля задачи из строки markdown. `line` собирает их обратно —
+/// название, потом метки в порядке, который читает плагин Obsidian Tasks.
+struct TaskFields: Hashable {
+    var text = ""                       // название без служебных меток
+    var kind = TaskKind.other
+    var from: String?                   // от кого поручение, без «@»
+    var priority = TaskPriority.none
+    var created: Date?                  // ➕
+    var due: Date?                      // 📅 — только свой, без срока заметки
+    var done: Date?                     // ✅
 
-    var kind: TaskKind = .other
-    var from: String?      // от кого поручение, без «@»
-    var priority: TaskPriority = .none
-    var createdAt: Date?   // ➕
-    var due: Date?         // свой 📅, иначе срок заметки
-    var doneAt: Date?      // ✅
-
-    var id: Int { line }
-
-    var isOverdue: Bool {
-        guard let due, !isDone else { return false }
-        return due < Calendar.current.startOfDay(for: Date())
-    }
-
-    var isDueToday: Bool {
-        guard let due else { return false }
-        return Calendar.current.isDateInToday(due)
-    }
-
-    /// Сдано позже срока
-    var isLate: Bool {
-        guard let due, let doneAt else { return false }
-        return doneAt > due
+    var line: String {
+        var out = [text]
+        if let tag = kind.tag { out.append(tag) }
+        if let from, !from.isEmpty { out.append("@" + from) }
+        if priority != .none { out.append(priority.rawValue) }
+        if let created { out.append("➕ " + Note.isoDay.string(from: created)) }
+        if let due { out.append("📅 " + Note.isoDay.string(from: due)) }
+        if let done { out.append("✅ " + Note.isoDay.string(from: done)) }
+        return out.filter { !$0.isEmpty }.joined(separator: " ")
     }
 
     /// Разбор хвоста строки после `- [ ]`. Нераспознанное остаётся в названии,
     /// поэтому строки без меток выглядят как раньше.
-    static func parse(_ body: String) -> (text: String, kind: TaskKind, from: String?,
-                                          priority: TaskPriority, created: Date?,
-                                          due: Date?, done: Date?) {
-        var kind = TaskKind.other, from: String?, priority = TaskPriority.none
-        var created: Date?, due: Date?, done: Date?
+    init(parsing body: String) {
         var kept: [Substring] = []
-
         let tokens = body.split(whereSeparator: \.isWhitespace)
         var i = 0
         while i < tokens.count {
@@ -152,7 +134,66 @@ struct ChecklistItem: Identifiable, Hashable {
             }
             i += 1
         }
-        return (kept.joined(separator: " "), kind, from, priority, created, due, done)
+        text = kept.joined(separator: " ")
+    }
+
+    init() {}
+}
+
+/// Пункт чек-листа. Живёт прямо в тексте заметки — отдельной модели нет,
+/// поэтому заметка остаётся обычным markdown и без потерь уезжает в Obsidian.
+/// Служебные метки (формат Obsidian Tasks) разбираются из той же строки:
+/// `- [ ] Отчёт #осн @руководитель 🔼 ➕ 2026-10-15 📅 2026-10-20`
+struct ChecklistItem: Identifiable, Hashable {
+    let line: Int          // индекс строки в тексте заметки
+    let isDone: Bool
+    let depth: Int         // 0 — задача, 1+ — подзадача (по отступу)
+    var fields = TaskFields()
+    var inheritedDue: Date? = nil   // срок заметки
+    var parent: Int? = nil          // строка родительской задачи
+
+    var id: Int { line }
+
+    var text: String { fields.text }
+    var kind: TaskKind { fields.kind }
+    var from: String? { fields.from }
+    var priority: TaskPriority { fields.priority }
+    var createdAt: Date? { fields.created }
+    var doneAt: Date? { fields.done }
+    /// Свой 📅, иначе срок заметки
+    var due: Date? { fields.due ?? inheritedDue }
+
+    var isOverdue: Bool {
+        guard let due, !isDone else { return false }
+        return due < Calendar.current.startOfDay(for: Date())
+    }
+
+    var isDueToday: Bool {
+        guard let due else { return false }
+        return Calendar.current.isDateInToday(due)
+    }
+
+    /// Сдано позже срока
+    var isLate: Bool {
+        guard let due, let doneAt else { return false }
+        return doneAt > due
+    }
+
+    /// `  - [x] хвост` → («  - [x] », «хвост»). nil — строка не чекбокс.
+    static func split(_ raw: String) -> (prefix: String, body: String, isDone: Bool, width: Int)? {
+        let indent = raw.prefix { $0 == " " || $0 == "\t" }
+        let body = raw.dropFirst(indent.count)
+        guard body.hasPrefix("- [") || body.hasPrefix("* [") else { return nil }
+
+        let rest = body.dropFirst(3)                      // после "- ["
+        guard let mark = rest.first, rest.dropFirst().first == "]" else { return nil }
+        let done = mark == "x" || mark == "X"
+        guard done || mark == " " else { return nil }
+
+        let tail = rest.dropFirst(2)
+        let prefix = String(raw[..<tail.startIndex]) + " "
+        let width = indent.reduce(0) { $0 + ($1 == "\t" ? 4 : 1) }
+        return (prefix, tail.trimmingCharacters(in: .whitespaces), done, width)
     }
 }
 
@@ -232,22 +273,16 @@ struct Note: Identifiable, Codable, Hashable {
 
     /// Разбор markdown-чекбоксов с учётом отступов: `- [ ]`, `* [x]`, вложенные подзадачи
     var checklist: [ChecklistItem] {
-        text.components(separatedBy: "\n").enumerated().compactMap { index, raw in
-            let indent = raw.prefix { $0 == " " || $0 == "\t" }
-            let body = raw.dropFirst(indent.count)
-            guard body.hasPrefix("- [") || body.hasPrefix("* [") else { return nil }
-
-            let rest = body.dropFirst(3)                      // после "- ["
-            guard let mark = rest.first, rest.dropFirst().first == "]" else { return nil }
-            let done = mark == "x" || mark == "X"
-            guard done || mark == " " else { return nil }
-
-            let width = indent.reduce(0) { $0 + ($1 == "\t" ? 4 : 1) }
-            let p = ChecklistItem.parse(String(rest.dropFirst(2)))
-            return ChecklistItem(line: index, text: p.text, isDone: done,
-                                 depth: min(width / 2, 3),
-                                 kind: p.kind, from: p.from, priority: p.priority,
-                                 createdAt: p.created, due: p.due ?? dueDate, doneAt: p.done)
+        var chain: [ChecklistItem] = []          // открытые предки текущей строки
+        return text.components(separatedBy: "\n").enumerated().compactMap { index, raw in
+            guard let s = ChecklistItem.split(raw) else { return nil }
+            let depth = min(s.width / 2, 3)
+            while let last = chain.last, last.depth >= depth { chain.removeLast() }
+            let item = ChecklistItem(line: index, isDone: s.isDone, depth: depth,
+                                     fields: TaskFields(parsing: s.body),
+                                     inheritedDue: dueDate, parent: chain.last?.line)
+            chain.append(item)
+            return item
         }
     }
 

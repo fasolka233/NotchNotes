@@ -55,11 +55,20 @@ enum TaskScope: String, CaseIterable, Identifiable {
     }
 }
 
-/// Задача вместе с заметкой, в которой живёт
+/// Задача вместе с заметкой, в которой живёт, и всеми своими подзадачами
 struct TaskEntry: Identifiable {
     let note: Note
     let item: ChecklistItem
+    var children: [ChecklistItem] = []
     var id: String { "\(note.id)-\(item.line)" }
+
+    private var open: [ChecklistItem] { ([item] + children).filter { !$0.isDone } }
+
+    /// Горит сама задача или любая её открытая подзадача
+    var isOverdue: Bool { open.contains(where: \.isOverdue) }
+    /// Ближайший срок по открытым пунктам
+    var nextDue: Date? { open.compactMap(\.due).min() }
+    var progress: (done: Int, total: Int) { (children.filter(\.isDone).count, children.count) }
 }
 
 final class NotesStore: ObservableObject {
@@ -142,15 +151,16 @@ final class NotesStore: ObservableObject {
 
     // MARK: - Учёт поручений
 
-    /// Задачи среза. Открытые: просроченные → по сроку → без срока, внутри — по приоритету.
-    /// Сделанные: свежие сверху; без даты сдачи (старые заметки) — в конце.
-    func tasks(_ scope: TaskScope, kind: TaskKind? = nil) -> [TaskEntry] {
+    /// Задачи верхнего уровня с подзадачами. Задача попадает в срез, если подходит
+    /// она сама или любая её подзадача. Открытые: просроченные → по сроку → без срока,
+    /// внутри — по приоритету. Сделанные: свежие сверху, без даты сдачи — в конце.
+    func tasks(_ scope: TaskScope, kind: TaskKind? = nil,
+               from: String? = nil, query: String = "") -> [TaskEntry] {
         let monthAgo = Calendar.current.date(byAdding: .day, value: -30,
                                              to: Calendar.current.startOfDay(for: Date()))!
-        let all = notes.flatMap { note in note.checklist.map { TaskEntry(note: note, item: $0) } }
-        let picked = all.filter { e in
-            let t = e.item
-            if let kind, t.kind != kind { return false }
+        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
+
+        let fits: (ChecklistItem) -> Bool = { t in
             switch scope {
             case .open:    return !t.isDone
             case .today:   return !t.isDone && (t.isDueToday || t.isOverdue)
@@ -159,29 +169,62 @@ final class NotesStore: ObservableObject {
             }
         }
 
+        let picked = taskTree().filter { e in
+            let all = [e.item] + e.children
+            if let kind, e.item.kind != kind { return false }
+            if let from, !all.contains(where: { $0.from?.caseInsensitiveCompare(from) == .orderedSame }) {
+                return false
+            }
+            if !q.isEmpty, !e.note.title.lowercased().contains(q),
+               !all.contains(where: { ($0.text + " " + ($0.from ?? "")).lowercased().contains(q) }) {
+                return false
+            }
+            // сделанное считаем по самой задаче: открытая подзадача её не «раскрывает»
+            return scope == .done ? fits(e.item) : all.contains(where: fits)
+        }
+
         if scope == .done {
             return picked.sorted { ($0.item.doneAt ?? .distantPast) > ($1.item.doneAt ?? .distantPast) }
         }
         return picked.sorted { a, b in
-            let x = a.item, y = b.item
-            if x.isOverdue != y.isOverdue { return x.isOverdue }
-            switch (x.due, y.due) {
+            if a.isOverdue != b.isOverdue { return a.isOverdue }
+            switch (a.nextDue, b.nextDue) {
             case let (p?, q?) where p != q: return p < q
             case (.some, .none): return true
             case (.none, .some): return false
-            default: return x.priority.rank < y.priority.rank
+            default: return a.item.priority.rank < b.item.priority.rank
             }
         }
     }
 
+    /// Все задачи верхнего уровня; подзадачи собраны под своим корнем
+    private func taskTree() -> [TaskEntry] {
+        notes.flatMap { note -> [TaskEntry] in
+            var out: [TaskEntry] = []
+            for item in note.checklist {
+                if item.parent == nil || out.isEmpty {
+                    out.append(TaskEntry(note: note, item: item))
+                } else {
+                    out[out.count - 1].children.append(item)
+                }
+            }
+            return out
+        }
+    }
+
+    /// Все пункты плоско — для экспорта
+    var allTaskItems: [TaskEntry] {
+        notes.flatMap { n in n.checklist.map { TaskEntry(note: n, item: $0) } }
+    }
+
     /// «Активных 5 · просрочено 1 · сдано за неделю 7 · в срок 86%»
-    func taskSummary(kind: TaskKind? = nil) -> String {
+    func taskSummary(kind: TaskKind? = nil, from: String? = nil) -> String {
         let weekAgo = Calendar.current.date(byAdding: .day, value: -6,
                                             to: Calendar.current.startOfDay(for: Date()))!
-        let open = tasks(.open, kind: kind)
-        let week = tasks(.done, kind: kind).filter { ($0.item.doneAt ?? .distantPast) >= weekAgo }
+        let open = tasks(.open, kind: kind, from: from)
+        let week = tasks(.done, kind: kind, from: from).filter { ($0.item.doneAt ?? .distantPast) >= weekAgo }
         var parts = ["Активных \(open.count)",
-                     "просрочено \(open.filter(\.item.isOverdue).count)",
+                     "просрочено \(open.filter(\.isOverdue).count)",
                      "сдано за неделю \(week.count)"]
         let timed = week.filter { $0.item.due != nil }
         if !timed.isEmpty {
@@ -189,6 +232,18 @@ final class NotesStore: ObservableObject {
             parts.append("в срок \(Int((Double(onTime) / Double(timed.count) * 100).rounded()))%")
         }
         return parts.joined(separator: " · ")
+    }
+
+    /// Имена из `@` по частоте — для фильтра и подсказок при вводе
+    var taskAuthors: [String] {
+        var freq: [String: (name: String, n: Int)] = [:]
+        for note in notes {
+            for name in note.checklist.compactMap(\.from) {
+                let key = name.lowercased()
+                freq[key] = (freq[key]?.name ?? name, (freq[key]?.n ?? 0) + 1)
+            }
+        }
+        return freq.values.sorted { $0.n != $1.n ? $0.n > $1.n : $0.name < $1.name }.map(\.name)
     }
 
     // MARK: - Мутации
@@ -268,12 +323,15 @@ final class NotesStore: ObservableObject {
                                   options: .regularExpression)
     }
 
-    /// Подзадача — та же строка markdown, но с отступом на два пробела глубже
+    /// Подзадача — та же строка markdown, но с отступом на два пробела глубже.
+    /// Встаёт в конец уже существующих подзадач, текст разбирается как быстрый ввод.
     func addSubtask(after line: Int, in id: Note.ID, text: String = "") {
+        let body = text.isEmpty ? "" : Self.normalizeTask(text)
+        guard text.isEmpty || !body.isEmpty else { return }
         editLines(id) { lines in
             guard lines.indices.contains(line) else { return false }
             let indent = String(lines[line].prefix { $0 == " " || $0 == "\t" })
-            lines.insert(indent + "  - [ ] " + text, at: line + 1)
+            lines.insert(indent + "  - [ ] " + body, at: Self.blockEnd(lines, line) + 1)
             return true
         }
     }
@@ -284,6 +342,77 @@ final class NotesStore: ObservableObject {
             lines.remove(at: line)
             return true
         }
+    }
+
+    /// Удалённая задача с подзадачами — для «Отменить»
+    struct RemovedTask: Equatable {
+        let note: Note.ID
+        let line: Int
+        let lines: [String]
+        let title: String
+    }
+
+    @Published var lastRemoved: RemovedTask?
+
+    /// Удалить задачу вместе с подзадачами; вернуть можно через `undoRemove()`
+    func removeTask(line: Int, in id: Note.ID) {
+        editLines(id) { lines in
+            guard lines.indices.contains(line) else { return false }
+            let range = line...Self.blockEnd(lines, line)
+            let title = ChecklistItem.split(lines[line]).map { TaskFields(parsing: $0.body).text } ?? ""
+            lastRemoved = RemovedTask(note: id, line: line, lines: Array(lines[range]), title: title)
+            lines.removeSubrange(range)
+            return true
+        }
+    }
+
+    func undoRemove() {
+        guard let r = lastRemoved else { return }
+        lastRemoved = nil
+        editLines(r.note) { lines in
+            lines.insert(contentsOf: r.lines, at: min(r.line, lines.count))
+            return true
+        }
+    }
+
+    /// Поменять поля задачи и собрать строку заново — отступ и галочка сохраняются
+    func updateTask(line: Int, in id: Note.ID, _ change: (inout TaskFields) -> Void) {
+        editLines(id) { lines in
+            guard lines.indices.contains(line), let s = ChecklistItem.split(lines[line]) else { return false }
+            var f = TaskFields(parsing: s.body)
+            let before = f
+            change(&f)
+            f.from = f.from?.split(whereSeparator: \.isWhitespace).joined(separator: "_")
+            if f.from?.isEmpty == true { f.from = nil }
+            guard f != before else { return false }
+            lines[line] = s.prefix + f.line
+            return true
+        }
+    }
+
+    /// Перенести срок на `days` дней. Просроченное — считаем от сегодня,
+    /// иначе «+1 день» оставил бы задачу просроченной.
+    func shiftDue(line: Int, in id: Note.ID, days: Int) {
+        let today = Calendar.current.startOfDay(for: Date())
+        let item = note(id)?.checklist.first { $0.line == line }
+        let base = max(item?.due ?? today, today)
+        updateTask(line: line, in: id) {
+            $0.due = Calendar.current.date(byAdding: .day, value: days, to: base)
+        }
+    }
+
+    /// Последняя строка блока: сама строка и всё, что под ней с отступом глубже
+    private static func blockEnd(_ lines: [String], _ line: Int) -> Int {
+        let width = { (l: String) in l.prefix { $0 == " " || $0 == "\t" }
+            .reduce(0) { $0 + ($1 == "\t" ? 4 : 1) } }
+        let base = width(lines[line])
+        var end = line
+        while end + 1 < lines.count,
+              !lines[end + 1].trimmingCharacters(in: .whitespaces).isEmpty,
+              width(lines[end + 1]) > base {
+            end += 1
+        }
+        return end
     }
 
     /// Добавить задачу в конец заметки. Метки из быстрого ввода приводятся
@@ -318,14 +447,10 @@ final class NotesStore: ObservableObject {
             i += 1
         }
 
-        let p = ChecklistItem.parse(tokens.joined(separator: " "))
-        var out = [p.text]
-        if let tag = p.kind.tag { out.append(tag) }
-        if let from = p.from { out.append("@" + from) }
-        if p.priority != .none { out.append(p.priority.rawValue) }
-        out.append("➕ " + Note.isoDay.string(from: p.created ?? start))
-        if let due = p.due { out.append("📅 " + Note.isoDay.string(from: due)) }
-        return p.text.isEmpty ? "" : out.joined(separator: " ")
+        var f = TaskFields(parsing: tokens.joined(separator: " "))
+        guard !f.text.isEmpty else { return "" }
+        f.created = f.created ?? start
+        return f.line
     }
 
     /// `завтра`, `пт`, `20.10`, `20.10.2026` → день. Дата без года, которая
@@ -397,7 +522,7 @@ final class NotesStore: ObservableObject {
     /// Все задачи в CSV для Excel: `;`, UTF-8 с BOM, даты `ДД.ММ.ГГГГ` —
     /// русский Excel открывает двойным кликом и сам распознаёт даты.
     func exportTasksCSV() {
-        let csv = Self.tasksCSV(notes.flatMap { n in n.checklist.map { TaskEntry(note: n, item: $0) } })
+        let csv = Self.tasksCSV(allTaskItems)
         let panel = NSSavePanel()
         panel.nameFieldStringValue = "Задачи " + Note.isoDay.string(from: Date()) + ".csv"
         panel.allowedContentTypes = [.commaSeparatedText]

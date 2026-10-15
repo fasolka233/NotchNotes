@@ -12,6 +12,7 @@ enum SelfCheck {
         checkTaskEditing()
         checkFiltersAndDates()
         checkTaskMarks()
+        checkTaskEditor()
         checkReminders()
         checkClipboardHeuristics()
         checkPomodoroCycle()
@@ -221,6 +222,61 @@ enum SelfCheck {
         assert(rows[0] == "Получено;Задача;Тип;От кого;Приоритет;Срок;Статус;Сдано;Заметка")
         assert(rows[1] == "10.10.2026;\"'=SUM; \"\"итог\"\"\";Основная;Анна;;12.10.2026;сдано с опозданием;13.10.2026;Отдел",
                "строка CSV: \(rows[1])")
+    }
+
+    /// Редактор: правка полей, подзадачи под родителем, удаление с отменой, перенос срока
+    private static func checkTaskEditor() {
+        let cal = Calendar.current
+        let iso = { (d: Date) in Note.isoDay.string(from: d) }
+        let today = cal.startOfDay(for: Date())
+        let store = scratchStore()
+        let n = store.addNote("""
+        Проект
+        - [ ] Отчёт @Анна
+          - [ ] собрать цифры
+            - [x] выгрузка
+          - [ ] свести таблицу @Олег
+        - [ ] Второе
+        """)
+        let lines = { store.text(for: n.id).components(separatedBy: "\n") }
+
+        // иерархия: подзадачи собраны под корнем, родитель знает прогресс
+        let tree = store.tasks(.open)
+        assert(tree.map(\.item.text) == ["Отчёт", "Второе"], "корни: \(tree.map(\.item.text))")
+        assert(tree[0].children.map(\.text) == ["собрать цифры", "выгрузка", "свести таблицу"])
+        assert(tree[0].progress == (1, 3))
+        assert(store.note(n.id)!.checklist[2].parent == 2, "родитель подподзадачи")
+
+        // фильтры: автор подзадачи находит корень, поиск — по названию
+        assert(store.tasks(.open, from: "олег").map(\.item.text) == ["Отчёт"])
+        assert(store.tasks(.open, query: "втор").map(\.item.text) == ["Второе"])
+        assert(store.taskAuthors.sorted() == ["Анна", "Олег"])
+
+        // правка полей пересобирает строку, отступ и галочка на месте
+        store.updateTask(line: 2, in: n.id) {
+            $0.kind = .main; $0.priority = .high; $0.from = "Иван Петров"
+            $0.due = cal.date(byAdding: .day, value: -1, to: today)
+        }
+        assert(lines()[2] == "  - [ ] собрать цифры #осн @Иван_Петров ⏫ 📅 \(iso(cal.date(byAdding: .day, value: -1, to: today)!))",
+               "строка: \(lines()[2])")
+        assert(store.tasks(.overdue).map(\.item.text) == ["Отчёт"], "просрочка подзадачи поднимает корень")
+
+        // перенос просроченного считаем от сегодня
+        store.shiftDue(line: 2, in: n.id, days: 1)
+        assert(store.note(n.id)!.checklist[1].fields.due == cal.date(byAdding: .day, value: 1, to: today))
+
+        // новая подзадача встаёт в конец блока и разбирается как быстрый ввод
+        store.addSubtask(after: 1, in: n.id, text: "сверить !завтра")
+        assert(lines()[5].hasPrefix("  - [ ] сверить ➕ \(iso(today)) 📅"), "подзадача: \(lines()[5])")
+        assert(lines()[6] == "- [ ] Второе")
+
+        // удаление уносит подзадачи, отмена возвращает всё как было
+        let before = store.text(for: n.id)
+        store.removeTask(line: 1, in: n.id)
+        assert(lines() == ["Проект", "- [ ] Второе"], "удаление блока: \(lines())")
+        assert(store.lastRemoved?.title == "Отчёт")
+        store.undoRemove()
+        assert(store.text(for: n.id) == before && store.lastRemoved == nil, "отмена удаления")
     }
 
     private static func checkReminders() {
