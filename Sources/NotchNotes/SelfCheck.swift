@@ -11,6 +11,7 @@ enum SelfCheck {
         checkLegacyDecoding()
         checkTaskEditing()
         checkFiltersAndDates()
+        checkTaskMarks()
         checkReminders()
         checkClipboardHeuristics()
         checkPomodoroCycle()
@@ -138,6 +139,88 @@ enum SelfCheck {
         // закрытые задачи гасят просрочку — заметка перестаёт «гореть»
         store.toggleItem(line: 1, in: overdue.id)
         assert(store.note(overdue.id)?.isOverdue == false, "выполненная заметка не просрочена")
+    }
+
+    /// Учёт поручений: метки Obsidian Tasks в строке, автодаты, сроки по задаче, CSV
+    private static func checkTaskMarks() {
+        let cal = Calendar.current
+        let day = { (s: String) in Note.isoDay.date(from: s)! }
+        let iso = { (d: Date) in Note.isoDay.string(from: d) }
+        let today = cal.startOfDay(for: Date())
+
+        // разбор меток: название чистое, всё служебное — в полях
+        let parsed = Note(text: "- [ ] X #осн @Анна 🔼 ➕ 2026-10-15 📅 2026-10-20 #отчёты").checklist[0]
+        assert(parsed.text == "X #отчёты", "название: \(parsed.text)")
+        assert(parsed.kind == .main && parsed.from == "Анна" && parsed.priority == .medium)
+        assert(parsed.createdAt == day("2026-10-15") && parsed.due == day("2026-10-20"))
+        let done = Note(text: "- [x] SOP #доп ✅️ 2026-10-13 📅 2026-10-12").checklist[0]
+        assert(done.kind == .extra && done.doneAt == day("2026-10-13") && done.isLate,
+               "сдано позже срока — с опозданием")
+        let plain = Note(text: "- [ ] просто 📅 не дата @ #осн,").checklist[0]
+        assert(plain.text == "просто 📅 не дата @ #осн," && plain.kind == .other && plain.due == nil,
+               "старые строки без меток не меняются: \(plain.text)")
+
+        // срок: свой 📅 важнее срока заметки, без своего — наследуется
+        var note = Note(text: "- [ ] своё 📅 2030-01-01\n- [ ] общее")
+        note.dueDate = day("2029-05-05")
+        assert(note.checklist[0].due == day("2030-01-01") && note.checklist[1].due == day("2029-05-05"))
+
+        // просрочка по задаче, даже если у заметки срока нет
+        let store = scratchStore()
+        let yesterday = iso(cal.date(byAdding: .day, value: -1, to: today)!)
+        let tomorrow = iso(cal.date(byAdding: .day, value: 1, to: today)!)
+        let n = store.addNote("""
+        Работа
+        - [ ] горит 🔽 📅 \(yesterday)
+        - [ ] важное ⏫ 📅 \(tomorrow) #осн
+        - [ ] сегодня 📅 \(iso(today))
+        - [ ] когда-нибудь
+        - [x] старое без даты
+        - [x] давно ✅ 2000-01-01
+        """)
+        assert(store.note(n.id)?.dueDate == nil && store.note(n.id)?.isOverdue == true)
+        assert(store.tasks(.overdue).map(\.item.text) == ["горит"])
+        assert(store.tasks(.open).map(\.item.text) == ["горит", "сегодня", "важное", "когда-нибудь"],
+               "сортировка: \(store.tasks(.open).map(\.item.text))")
+        assert(store.tasks(.today).count == 2, "сегодня = срок сегодня + просрочка")
+        assert(store.tasks(.done).map(\.item.text) == ["старое без даты"], "сделано — за 30 дней")
+        assert(store.tasks(.open, kind: .main).map(\.item.text) == ["важное"])
+
+        // автодаты: ✅ при отметке, пропадает при снятии
+        store.toggleItem(line: 4, in: n.id)
+        let line = { store.text(for: n.id).components(separatedBy: "\n")[4] }
+        assert(line() == "- [x] когда-нибудь ✅ \(iso(today))", "строка: \(line())")
+        assert(store.taskSummary() == "Активных 3 · просрочено 1 · сдано за неделю 1",
+               "сводка: \(store.taskSummary())")
+        store.toggleItem(line: 4, in: n.id)
+        assert(line() == "- [ ] когда-нибудь", "дата сдачи не снялась: \(line())")
+
+        store.toggleItem(line: 2, in: n.id)   // важное — сдано до срока
+        assert(store.taskSummary().hasSuffix("в срок 100%"), store.taskSummary())
+
+        // быстрый ввод: короткие сроки → 📅 ГГГГ-ММ-ДД, ➕ сегодня, поля в конце
+        let wed = day("2026-10-14")
+        assert(NotesStore.normalizeTask("Отчёт 📅 20.10 #осн @руководитель", today: wed)
+               == "Отчёт #осн @руководитель ➕ 2026-10-14 📅 2026-10-20")
+        assert(NotesStore.normalizeTask("!пт звонок 🔼", today: wed)
+               == "звонок 🔼 ➕ 2026-10-14 📅 2026-10-16")
+        assert(NotesStore.normalizeTask("сдать !завтра", today: wed).hasSuffix("📅 2026-10-15"))
+        assert(NotesStore.normalizeTask("сдать !ср", today: wed).hasSuffix("📅 2026-10-14"))
+        assert(NotesStore.normalizeTask("сдать 📅 01.02", today: wed).hasSuffix("📅 2027-02-01"),
+               "прошедшая дата без года — следующий год")
+        assert(NotesStore.normalizeTask("!важно 31.02", today: wed) == "!важно 31.02 ➕ 2026-10-14")
+        store.addTask("из инбокса @Олег", to: n.id)
+        let added = store.note(n.id)!.checklist.last!
+        assert(added.text == "из инбокса" && added.from == "Олег" && added.createdAt == today)
+
+        // CSV: BOM, «;», даты ДД.ММ.ГГГГ, защита от формул и кавычки
+        let csvNote = Note(text: "Отдел\n- [x] =SUM; \"итог\" #осн @Анна ➕ 2026-10-10 📅 2026-10-12 ✅ 2026-10-13")
+        let csv = NotesStore.tasksCSV(csvNote.checklist.map { TaskEntry(note: csvNote, item: $0) })
+        assert(csv.starts(with: [0xEF, 0xBB, 0xBF]), "нет BOM")
+        let rows = String(decoding: csv.dropFirst(3), as: UTF8.self).components(separatedBy: "\r\n")
+        assert(rows[0] == "Получено;Задача;Тип;От кого;Приоритет;Срок;Статус;Сдано;Заметка")
+        assert(rows[1] == "10.10.2026;\"'=SUM; \"\"итог\"\"\";Основная;Анна;;12.10.2026;сдано с опозданием;13.10.2026;Отдел",
+               "строка CSV: \(rows[1])")
     }
 
     private static func checkReminders() {

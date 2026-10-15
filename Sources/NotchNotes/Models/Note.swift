@@ -34,15 +34,126 @@ enum NoteColor: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+/// Тип поручения: `#осн` / `#доп`, без метки — «прочее»
+enum TaskKind: String, CaseIterable, Identifiable {
+    case main, extra, other
+
+    var id: String { rawValue }
+
+    var tag: String? {
+        switch self {
+        case .main:  return "#осн"
+        case .extra: return "#доп"
+        case .other: return nil
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .main:  return "Основная"
+        case .extra: return "Дополнительная"
+        case .other: return "Прочее"
+        }
+    }
+}
+
+/// Приоритет в нотации Obsidian Tasks. `rank` — для сортировки: меньше = важнее.
+enum TaskPriority: String, CaseIterable {
+    case high = "⏫", medium = "🔼", low = "🔽", none = ""
+
+    var rank: Int {
+        switch self {
+        case .high: return 0
+        case .medium: return 1
+        case .none: return 2
+        case .low: return 3
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .high: return "высокий"
+        case .medium: return "средний"
+        case .low: return "низкий"
+        case .none: return ""
+        }
+    }
+}
+
 /// Пункт чек-листа. Живёт прямо в тексте заметки — отдельной модели нет,
 /// поэтому заметка остаётся обычным markdown и без потерь уезжает в Obsidian.
+/// Служебные метки (формат Obsidian Tasks) разбираются из той же строки:
+/// `- [ ] Отчёт #осн @руководитель 🔼 ➕ 2026-10-15 📅 2026-10-20`
 struct ChecklistItem: Identifiable, Hashable {
     let line: Int          // индекс строки в тексте заметки
-    let text: String
+    let text: String       // название без служебных меток
     let isDone: Bool
     let depth: Int         // 0 — задача, 1+ — подзадача (по отступу)
 
+    var kind: TaskKind = .other
+    var from: String?      // от кого поручение, без «@»
+    var priority: TaskPriority = .none
+    var createdAt: Date?   // ➕
+    var due: Date?         // свой 📅, иначе срок заметки
+    var doneAt: Date?      // ✅
+
     var id: Int { line }
+
+    var isOverdue: Bool {
+        guard let due, !isDone else { return false }
+        return due < Calendar.current.startOfDay(for: Date())
+    }
+
+    var isDueToday: Bool {
+        guard let due else { return false }
+        return Calendar.current.isDateInToday(due)
+    }
+
+    /// Сдано позже срока
+    var isLate: Bool {
+        guard let due, let doneAt else { return false }
+        return doneAt > due
+    }
+
+    /// Разбор хвоста строки после `- [ ]`. Нераспознанное остаётся в названии,
+    /// поэтому строки без меток выглядят как раньше.
+    static func parse(_ body: String) -> (text: String, kind: TaskKind, from: String?,
+                                          priority: TaskPriority, created: Date?,
+                                          due: Date?, done: Date?) {
+        var kind = TaskKind.other, from: String?, priority = TaskPriority.none
+        var created: Date?, due: Date?, done: Date?
+        var kept: [Substring] = []
+
+        let tokens = body.split(whereSeparator: \.isWhitespace)
+        var i = 0
+        while i < tokens.count {
+            let tok = tokens[i]
+            // ✅ и ✅︎ — один и тот же значок, вариационный селектор не в счёт
+            let bare = tok.unicodeScalars.filter { $0 != "\u{FE0F}" }.map(String.init).joined()
+            let next = i + 1 < tokens.count ? Note.isoDay.date(from: String(tokens[i + 1])) : nil
+
+            switch bare {
+            case "➕" where next != nil: created = next; i += 2; continue
+            case "📅" where next != nil: due = next; i += 2; continue
+            case "✅" where next != nil: done = next; i += 2; continue
+            case "⏫": priority = .high
+            case "🔼": priority = .medium
+            case "🔽": priority = .low
+            default:
+                let lower = tok.lowercased()
+                if lower == "#осн" { kind = .main }
+                else if lower == "#доп" { kind = .extra }
+                else if tok.hasPrefix("@"), tok.dropFirst().first?.isLetter == true {
+                    from = String(tok.dropFirst())
+                        .trimmingCharacters(in: CharacterSet(charactersIn: ".,;:!?"))
+                } else {
+                    kept.append(tok)
+                }
+            }
+            i += 1
+        }
+        return (kept.joined(separator: " "), kind, from, priority, created, due, done)
+    }
 }
 
 struct Note: Identifiable, Codable, Hashable {
@@ -132,10 +243,11 @@ struct Note: Identifiable, Codable, Hashable {
             guard done || mark == " " else { return nil }
 
             let width = indent.reduce(0) { $0 + ($1 == "\t" ? 4 : 1) }
-            return ChecklistItem(line: index,
-                                 text: rest.dropFirst(2).trimmingCharacters(in: .whitespaces),
-                                 isDone: done,
-                                 depth: min(width / 2, 3))
+            let p = ChecklistItem.parse(String(rest.dropFirst(2)))
+            return ChecklistItem(line: index, text: p.text, isDone: done,
+                                 depth: min(width / 2, 3),
+                                 kind: p.kind, from: p.from, priority: p.priority,
+                                 createdAt: p.created, due: p.due ?? dueDate, doneAt: p.done)
         }
     }
 
@@ -159,9 +271,12 @@ struct Note: Identifiable, Codable, Hashable {
 
     // MARK: - Сроки
 
+    /// Горит сама заметка или любая её открытая задача со своим сроком
     var isOverdue: Bool {
-        guard let due = dueDate, !isComplete else { return false }
-        return due < Calendar.current.startOfDay(for: Date())
+        if let due = dueDate, !isComplete, due < Calendar.current.startOfDay(for: Date()) {
+            return true
+        }
+        return openTasks.contains(where: \.isOverdue)
     }
 
     var isDueToday: Bool {
@@ -183,13 +298,24 @@ struct Note: Identifiable, Codable, Hashable {
         return f
     }()
 
-    var dueLabel: String? {
-        guard let due = dueDate else { return nil }
+    /// Даты в строке задачи: `2026-10-20`, как пишет Obsidian Tasks
+    static let isoDay: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.calendar = Calendar(identifier: .gregorian)
+        f.dateFormat = "yyyy-MM-dd"
+        f.isLenient = false
+        return f
+    }()
+
+    var dueLabel: String? { dueDate.map(Note.dayLabel) }
+
+    static func dayLabel(_ date: Date) -> String {
         let cal = Calendar.current
-        if cal.isDateInToday(due) { return "сегодня" }
-        if cal.isDateInTomorrow(due) { return "завтра" }
-        if cal.isDateInYesterday(due) { return "вчера" }
-        return Note.dayFormatter.string(from: due)
+        if cal.isDateInToday(date) { return "сегодня" }
+        if cal.isDateInTomorrow(date) { return "завтра" }
+        if cal.isDateInYesterday(date) { return "вчера" }
+        return dayFormatter.string(from: date)
     }
 
     var reminderLabel: String? {

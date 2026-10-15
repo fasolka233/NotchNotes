@@ -30,6 +30,38 @@ enum NoteFilter: String, CaseIterable, Identifiable {
     }
 }
 
+/// Срезы вкладки «Задачи» — считаются по задачам, а не по заметкам
+enum TaskScope: String, CaseIterable, Identifiable {
+    case open, today, overdue, done
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .open:    return "Открытые"
+        case .today:   return "Сегодня"
+        case .overdue: return "Просрочено"
+        case .done:    return "Сделано"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .open:    return "circle"
+        case .today:   return "sun.max"
+        case .overdue: return "exclamationmark.triangle"
+        case .done:    return "checkmark.circle"
+        }
+    }
+}
+
+/// Задача вместе с заметкой, в которой живёт
+struct TaskEntry: Identifiable {
+    let note: Note
+    let item: ChecklistItem
+    var id: String { "\(note.id)-\(item.line)" }
+}
+
 final class NotesStore: ObservableObject {
 
     @Published var notes: [Note] = []
@@ -108,6 +140,57 @@ final class NotesStore: ObservableObject {
 
     var overdueCount: Int { notes.filter(\.isOverdue).count }
 
+    // MARK: - Учёт поручений
+
+    /// Задачи среза. Открытые: просроченные → по сроку → без срока, внутри — по приоритету.
+    /// Сделанные: свежие сверху; без даты сдачи (старые заметки) — в конце.
+    func tasks(_ scope: TaskScope, kind: TaskKind? = nil) -> [TaskEntry] {
+        let monthAgo = Calendar.current.date(byAdding: .day, value: -30,
+                                             to: Calendar.current.startOfDay(for: Date()))!
+        let all = notes.flatMap { note in note.checklist.map { TaskEntry(note: note, item: $0) } }
+        let picked = all.filter { e in
+            let t = e.item
+            if let kind, t.kind != kind { return false }
+            switch scope {
+            case .open:    return !t.isDone
+            case .today:   return !t.isDone && (t.isDueToday || t.isOverdue)
+            case .overdue: return t.isOverdue
+            case .done:    return t.isDone && (t.doneAt.map { $0 >= monthAgo } ?? true)
+            }
+        }
+
+        if scope == .done {
+            return picked.sorted { ($0.item.doneAt ?? .distantPast) > ($1.item.doneAt ?? .distantPast) }
+        }
+        return picked.sorted { a, b in
+            let x = a.item, y = b.item
+            if x.isOverdue != y.isOverdue { return x.isOverdue }
+            switch (x.due, y.due) {
+            case let (p?, q?) where p != q: return p < q
+            case (.some, .none): return true
+            case (.none, .some): return false
+            default: return x.priority.rank < y.priority.rank
+            }
+        }
+    }
+
+    /// «Активных 5 · просрочено 1 · сдано за неделю 7 · в срок 86%»
+    func taskSummary(kind: TaskKind? = nil) -> String {
+        let weekAgo = Calendar.current.date(byAdding: .day, value: -6,
+                                            to: Calendar.current.startOfDay(for: Date()))!
+        let open = tasks(.open, kind: kind)
+        let week = tasks(.done, kind: kind).filter { ($0.item.doneAt ?? .distantPast) >= weekAgo }
+        var parts = ["Активных \(open.count)",
+                     "просрочено \(open.filter(\.item.isOverdue).count)",
+                     "сдано за неделю \(week.count)"]
+        let timed = week.filter { $0.item.due != nil }
+        if !timed.isEmpty {
+            let onTime = timed.filter { !$0.item.isLate }.count
+            parts.append("в срок \(Int((Double(onTime) / Double(timed.count) * 100).rounded()))%")
+        }
+        return parts.joined(separator: " · ")
+    }
+
     // MARK: - Мутации
 
     @discardableResult
@@ -162,20 +245,27 @@ final class NotesStore: ObservableObject {
 
     // MARK: - Задачи внутри текста
 
-    /// Переключить чекбокс на конкретной строке
+    /// Переключить чекбокс на конкретной строке. Сделано — дописываем `✅ сегодня`,
+    /// сняли отметку — убираем дату сдачи.
     func toggleItem(line: Int, in id: Note.ID) {
         editLines(id) { lines in
             guard lines.indices.contains(line) else { return false }
             let l = lines[line]
             if let r = l.range(of: "[ ]") {
-                lines[line] = l.replacingCharacters(in: r, with: "[x]")
+                lines[line] = Self.stripDone(l.replacingCharacters(in: r, with: "[x]"))
+                    + " ✅ " + Note.isoDay.string(from: Date())
             } else if let r = l.range(of: "[x]") ?? l.range(of: "[X]") {
-                lines[line] = l.replacingCharacters(in: r, with: "[ ]")
+                lines[line] = Self.stripDone(l.replacingCharacters(in: r, with: "[ ]"))
             } else {
                 return false
             }
             return true
         }
+    }
+
+    private static func stripDone(_ line: String) -> String {
+        line.replacingOccurrences(of: #"\s*✅\x{FE0F}?\s+\d{4}-\d{2}-\d{2}"#, with: "",
+                                  options: .regularExpression)
     }
 
     /// Подзадача — та же строка markdown, но с отступом на два пробела глубже
@@ -196,13 +286,72 @@ final class NotesStore: ObservableObject {
         }
     }
 
-    /// Добавить задачу в конец заметки
+    /// Добавить задачу в конец заметки. Метки из быстрого ввода приводятся
+    /// к виду Obsidian Tasks, дата получения `➕` проставляется сама.
     func addTask(_ text: String, to id: Note.ID) {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+        let line = Self.normalizeTask(text)
+        guard !line.isEmpty else { return }
         let current = self.text(for: id)
         let prefix = current.isEmpty || current.hasSuffix("\n") ? "" : "\n"
-        setText(current + prefix + "- [ ] " + trimmed, for: id)
+        setText(current + prefix + "- [ ] " + line, for: id)
+    }
+
+    /// `Отчёт #осн @руководитель 📅 20.10 !пт` → `Отчёт #осн @руководитель ➕ 2026-10-15 📅 2026-10-17`.
+    /// Короткие сроки: `📅 20.10`, `📅 20.10.2026`, `!сегодня`, `!завтра`, `!пн`…`!вс`, `!20.10`.
+    /// Поля с эмодзи уходят в конец — так их читает плагин Obsidian Tasks.
+    static func normalizeTask(_ raw: String, today: Date = Date()) -> String {
+        let cal = Calendar.current
+        let start = cal.startOfDay(for: today)
+        var tokens = raw.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard !tokens.isEmpty else { return "" }
+
+        // короткие сроки → 📅 ГГГГ-ММ-ДД, прямо на месте
+        var i = 0
+        while i < tokens.count {
+            if tokens[i].hasPrefix("!"), let d = shortDate(String(tokens[i].dropFirst()), from: start) {
+                tokens[i...i] = ["📅", Note.isoDay.string(from: d)]
+            } else if tokens[i] == "📅", i + 1 < tokens.count,
+                      Note.isoDay.date(from: tokens[i + 1]) == nil,
+                      let d = shortDate(tokens[i + 1], from: start) {
+                tokens[i + 1] = Note.isoDay.string(from: d)
+            }
+            i += 1
+        }
+
+        let p = ChecklistItem.parse(tokens.joined(separator: " "))
+        var out = [p.text]
+        if let tag = p.kind.tag { out.append(tag) }
+        if let from = p.from { out.append("@" + from) }
+        if p.priority != .none { out.append(p.priority.rawValue) }
+        out.append("➕ " + Note.isoDay.string(from: p.created ?? start))
+        if let due = p.due { out.append("📅 " + Note.isoDay.string(from: due)) }
+        return p.text.isEmpty ? "" : out.joined(separator: " ")
+    }
+
+    /// `завтра`, `пт`, `20.10`, `20.10.2026` → день. Дата без года, которая
+    /// в этом году уже прошла, — это следующий год.
+    private static func shortDate(_ s: String, from start: Date) -> Date? {
+        let cal = Calendar.current
+        let words = ["сегодня": 0, "завтра": 1, "послезавтра": 2]
+        if let shift = words[s.lowercased()] { return cal.date(byAdding: .day, value: shift, to: start) }
+
+        // ближайший такой день недели, сегодня включительно
+        let weekdays = ["вс", "пн", "вт", "ср", "чт", "пт", "сб"]
+        if let wd = weekdays.firstIndex(of: s.lowercased()) {
+            let delta = (wd + 1 - cal.component(.weekday, from: start) + 7) % 7
+            return cal.date(byAdding: .day, value: delta, to: start)
+        }
+
+        let parts = s.split(separator: ".").compactMap { Int($0) }
+        guard parts.count == 2 || parts.count == 3,
+              s.split(separator: ".").count == parts.count else { return nil }
+        var c = DateComponents(year: parts.count == 3 ? parts[2] : cal.component(.year, from: start),
+                               month: parts[1], day: parts[0])
+        if let y = c.year, y < 100 { c.year = 2000 + y }
+        guard let d = cal.date(from: c), cal.component(.day, from: d) == parts[0],
+              cal.component(.month, from: d) == parts[1] else { return nil }
+        if parts.count == 2, d < start { return cal.date(byAdding: .year, value: 1, to: d) }
+        return d
     }
 
     /// Заметка-инбокс для быстрых задач без разбора, куда их класть
@@ -243,6 +392,52 @@ final class NotesStore: ObservableObject {
             guard response == .OK, let url = panel.url else { return }
             try? note.text.write(to: url, atomically: true, encoding: .utf8)
         }
+    }
+
+    /// Все задачи в CSV для Excel: `;`, UTF-8 с BOM, даты `ДД.ММ.ГГГГ` —
+    /// русский Excel открывает двойным кликом и сам распознаёт даты.
+    func exportTasksCSV() {
+        let csv = Self.tasksCSV(notes.flatMap { n in n.checklist.map { TaskEntry(note: n, item: $0) } })
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "Задачи " + Note.isoDay.string(from: Date()) + ".csv"
+        panel.allowedContentTypes = [.commaSeparatedText]
+        NSApp.activate(ignoringOtherApps: true)
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+            try? csv.write(to: url, options: .atomic)
+        }
+    }
+
+    static func tasksCSV(_ entries: [TaskEntry]) -> Data {
+        let day: (Date?) -> String = { $0.map { csvDay.string(from: $0) } ?? "" }
+        let sorted = entries.sorted { ($0.item.createdAt ?? .distantPast) < ($1.item.createdAt ?? .distantPast) }
+
+        var rows = [["Получено", "Задача", "Тип", "От кого", "Приоритет", "Срок", "Статус", "Сдано", "Заметка"]]
+        for e in sorted {
+            let t = e.item
+            let status = t.isDone ? (t.isLate ? "сдано с опозданием" : "сдано")
+                       : t.isOverdue ? "просрочено" : "в работе"
+            rows.append([day(t.createdAt), t.text, t.kind.title, t.from ?? "", t.priority.title,
+                         day(t.due), status, day(t.doneAt), e.note.title])
+        }
+        let body = rows.map { $0.map(csvField).joined(separator: ";") }.joined(separator: "\r\n") + "\r\n"
+        return Data([0xEF, 0xBB, 0xBF]) + Data(body.utf8)
+    }
+
+    private static let csvDay: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "ru_RU")
+        f.dateFormat = "dd.MM.yyyy"
+        return f
+    }()
+
+    /// Кавычки — если внутри разделитель/перевод строки; апостроф перед `= + - @`,
+    /// чтобы Excel не принял текст задачи за формулу.
+    private static func csvField(_ raw: String) -> String {
+        var s = raw
+        if let c = s.first, "=+-@".contains(c) { s = "'" + s }
+        guard s.contains(where: { ";\"\n\r".contains($0) }) else { return s }
+        return "\"" + s.replacingOccurrences(of: "\"", with: "\"\"") + "\""
     }
 
     private func safeFileName(_ raw: String) -> String {

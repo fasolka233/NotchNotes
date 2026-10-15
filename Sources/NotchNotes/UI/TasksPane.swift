@@ -1,81 +1,38 @@
 import SwiftUI
 import AppKit
 
-/// Сводка задач по всем заметкам: одно место, где видно «что горит».
-/// Своей модели нет — читаем те же markdown-чекбоксы, что и в заметках.
+/// Учёт поручений по всем заметкам: что поручили → что в работе → что сдал и вовремя ли.
+/// Своей модели нет — читаем те же markdown-чекбоксы с метками Obsidian Tasks.
 struct TasksPane: View {
     @ObservedObject var store: NotesStore
     var onReveal: (Note.ID) -> Void
 
-    enum Scope: String, CaseIterable, Identifiable {
-        case open, today, overdue, done
-        var id: String { rawValue }
-        var title: String {
-            switch self {
-            case .open:    return "Открытые"
-            case .today:   return "Сегодня"
-            case .overdue: return "Просрочено"
-            case .done:    return "Сделано"
-            }
-        }
-        var icon: String {
-            switch self {
-            case .open:    return "circle"
-            case .today:   return "sun.max"
-            case .overdue: return "exclamationmark.triangle"
-            case .done:    return "checkmark.circle"
-            }
-        }
-    }
-
-    @State private var scope: Scope = .open
+    @State private var scope: TaskScope = .open
+    @State private var kind: TaskKind? = nil
     @State private var draft = ""
 
-    /// Заметки с подходящими задачами, срочные сверху
-    private var groups: [(note: Note, items: [ChecklistItem])] {
-        store.notes.compactMap { note -> (Note, [ChecklistItem])? in
-            switch scope {
-            case .open where !note.openTasks.isEmpty:
-                return (note, note.openTasks)
-            case .done:
-                let done = note.checklist.filter(\.isDone)
-                return done.isEmpty ? nil : (note, done)
-            case .today where (note.isDueToday || note.isOverdue) && !note.openTasks.isEmpty:
-                return (note, note.openTasks)
-            case .overdue where note.isOverdue && !note.openTasks.isEmpty:
-                return (note, note.openTasks)
-            default:
-                return nil
-            }
-        }
-        .sorted { a, b in
-            if a.0.isOverdue != b.0.isOverdue { return a.0.isOverdue }
-            switch (a.0.dueDate, b.0.dueDate) {
-            case let (x?, y?) where x != y: return x < y
-            case (.some, .none): return true
-            case (.none, .some): return false
-            default: return a.0.updatedAt > b.0.updatedAt
-            }
-        }
-    }
+    private var entries: [TaskEntry] { store.tasks(scope, kind: kind) }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Theme.Space.m) {
+        let entries = entries
+        VStack(alignment: .leading, spacing: Theme.Space.s) {
             header
+            toolbar
 
-            if groups.isEmpty {
+            if entries.isEmpty {
                 EmptyState(icon: scope == .open ? "checkmark.seal" : "tray",
                            title: emptyTitle,
                            subtitle: scope == .open
-                                ? "Новые задачи появятся здесь автоматически"
+                                ? "Пример: Отчёт #осн @руководитель 📅 20.10"
                                 : nil)
             } else {
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: Theme.Space.m) {
-                        ForEach(groups, id: \.note.id) { group in
-                            section(group.note, group.items)
-                        }
+                    LazyVStack(alignment: .leading, spacing: 1) {
+                        ForEach(entries) { row($0) }
                     }
+                    .padding(4)
+                    .background(Theme.Surface.base,
+                                in: RoundedRectangle(cornerRadius: Theme.Radius.card))
                     .padding(.bottom, Theme.Space.s)
                 }
                 .scrollIndicators(.hidden)
@@ -89,20 +46,22 @@ struct TasksPane: View {
         case .open:    return "Задач нет — можно выдохнуть"
         case .today:   return "На сегодня ничего не запланировано"
         case .overdue: return "Просроченного нет"
-        case .done:    return "Пока ничего не сделано"
+        case .done:    return "За 30 дней ничего не сдано"
         }
     }
+
+    // MARK: - Шапка
 
     private var header: some View {
         HStack(spacing: Theme.Space.m) {
             HStack(spacing: 2) {
-                ForEach(Scope.allCases) { s in
+                ForEach(TaskScope.allCases) { s in
+                    let n = store.tasks(s, kind: kind).count
                     FilterChip(icon: s.icon,
                                title: s.title,
-                               count: count(s),
+                               count: n,
                                isOn: scope == s,
-                               tint: s == .overdue && store.overdueCount > 0
-                                     ? Theme.Accent.danger : nil,
+                               tint: s == .overdue && n > 0 ? Theme.Accent.danger : nil,
                                alwaysShowTitle: true) {
                         withAnimation(Theme.quick) { scope = s }
                     }
@@ -111,94 +70,173 @@ struct TasksPane: View {
 
             Spacer(minLength: Theme.Space.xs)
 
-            SearchField(placeholder: "Новая задача → Входящие",
+            SearchField(placeholder: "Задача #осн @кто !пт",
                         text: $draft, icon: "plus.circle", onSubmit: quickAdd)
-                .frame(width: 240)
+                .frame(width: 220)
+                .help("Попадёт во «Входящие». Метки: #осн / #доп, @от кого, ⏫ 🔼 🔽, срок: 📅 20.10, !завтра, !пт")
+
+            IconButton(icon: "square.and.arrow.up", hint: "Экспорт задач в CSV") {
+                store.exportTasksCSV()
+            }
         }
     }
 
-    /// Счётчик на чипе — сразу видно, где что-то есть, без переключения
-    private func count(_ s: Scope) -> Int {
-        s == .overdue ? store.overdueCount : 0
+    /// Тип поручения слева, сводка справа — одной строкой
+    private var toolbar: some View {
+        HStack(spacing: Theme.Space.m) {
+            HStack(spacing: 2) {
+                kindButton(nil, "Все")
+                kindButton(.main, "Основные")
+                kindButton(.extra, "Дополнительные")
+            }
+            .padding(2)
+            .background(Theme.Surface.field, in: Capsule())
+
+            Spacer(minLength: Theme.Space.xs)
+
+            Text(store.taskSummary(kind: kind))
+                .font(Theme.Font.caption.monospacedDigit())
+                .foregroundStyle(Theme.Ink.secondary)
+                .lineLimit(1)
+        }
     }
 
-    private func section(_ note: Note, _ items: [ChecklistItem]) -> some View {
-        VStack(alignment: .leading, spacing: Theme.Space.xs) {
-            HStack(spacing: Theme.Space.s) {
-                RoundedRectangle(cornerRadius: 2)
-                    .fill(note.color == .none ? Theme.Stroke.outline : note.color.tint)
-                    .frame(width: 3, height: 14)
+    private func kindButton(_ k: TaskKind?, _ title: String) -> some View {
+        let on = kind == k
+        return Button { withAnimation(Theme.quick) { kind = k } } label: {
+            Text(title)
+                .font(.system(size: 11, weight: on ? .semibold : .medium))
+                .padding(.horizontal, 9).padding(.vertical, 3)
+                .background(on ? Theme.Surface.active : .clear, in: Capsule())
+                .foregroundStyle(on ? Theme.Ink.primary : Theme.Ink.secondary)
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(on ? .isSelected : [])
+    }
 
-                Button { onReveal(note.id) } label: {
-                    HStack(spacing: 4) {
-                        Text(note.title)
-                            .font(.system(size: 12, weight: .semibold))
-                            .lineLimit(1)
-                        Image(systemName: "arrow.up.right")
-                            .font(.system(size: 9, weight: .semibold))
-                            .foregroundStyle(Theme.Ink.tertiary)
-                    }
+    // MARK: - Строка задачи
+
+    private func row(_ e: TaskEntry) -> some View {
+        let t = e.item
+        return HStack(spacing: Theme.Space.s) {
+            Button { store.toggleItem(line: t.line, in: e.note.id) } label: {
+                Image(systemName: t.isDone ? "checkmark.circle.fill" : "circle")
+                    .font(Theme.Icon.check)
+                    .foregroundStyle(t.isDone ? Theme.Accent.success : Theme.Ink.tertiary)
+                    .frame(width: 18, height: 18)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(t.isDone ? "Снять отметку" : "Отметить сделанным")
+            .accessibilityLabel(t.isDone ? "Снять отметку" : "Отметить сделанным")
+
+            // слот под приоритет есть всегда — названия стоят ровной колонкой
+            ZStack {
+                if let glyph = priorityGlyph(t.priority) {
+                    Image(systemName: glyph.icon)
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(glyph.tint)
+                        .help("Приоритет: \(t.priority.title)")
                 }
-                .buttonStyle(.plain)
-                .foregroundStyle(Theme.Ink.primary)
-                .help("Открыть заметку")
+            }
+            .frame(width: 10, height: 12)
 
-                if let due = note.dueLabel {
-                    Label(due, systemImage: note.reminderAt == nil ? "calendar" : "bell.fill")
-                        .font(.system(size: 11, weight: .medium))
-                        .padding(.horizontal, 7).padding(.vertical, 2)
-                        .background(note.isOverdue ? Theme.Accent.danger.opacity(0.22)
-                                    : note.isDueToday ? Theme.Accent.warning.opacity(0.20)
-                                    : Theme.Surface.field, in: Capsule())
-                        .foregroundStyle(note.isOverdue ? Theme.Accent.danger
-                                         : note.isDueToday ? Theme.Accent.warning
-                                         : Theme.Ink.secondary)
+            Text(t.text.isEmpty ? "Без названия" : t.text)
+                .font(Theme.Font.caption)
+                .strikethrough(t.isDone, color: Theme.Ink.tertiary)
+                .foregroundStyle(t.isDone ? Theme.Ink.tertiary : Theme.Ink.primary)
+                .lineLimit(1)
+                .help(t.text)
+
+            if kind == nil, t.kind != .other {
+                Text(t.kind == .main ? "осн" : "доп")
+                    .font(.system(size: 10, weight: .semibold))
+                    .padding(.horizontal, 5).padding(.vertical, 1)
+                    .background(Theme.Surface.field, in: Capsule())
+                    .foregroundStyle(Theme.Ink.secondary)
+                    .help(t.kind.title)
+            }
+
+            Spacer(minLength: Theme.Space.s)
+
+            if let from = t.from {
+                Text("@" + from)
+                    .font(Theme.Font.caption)
+                    .foregroundStyle(Theme.Ink.secondary)
+                    .lineLimit(1)
+                    .help("От кого")
+            }
+
+            if t.isDone {
+                doneLabel(t)
+            } else if let due = t.due {
+                dueChip(due, t)
+            }
+
+            Button { onReveal(e.note.id) } label: {
+                HStack(spacing: 2) {
+                    Text(e.note.title).lineLimit(1)
+                    Image(systemName: "arrow.up.right").font(.system(size: 8, weight: .semibold))
                 }
+                .font(.system(size: 10))
+                .foregroundStyle(Theme.Ink.tertiary)
+                .frame(maxWidth: 110, alignment: .trailing)
+            }
+            .buttonStyle(.plain)
+            .help("Открыть заметку «\(e.note.title)»")
+        }
+        .padding(.leading, 4 + CGFloat(t.depth) * 14).padding(.trailing, 6)
+        .padding(.vertical, 3)
+        .rowHighlight(selected: false, radius: 6)
+        .contentShape(Rectangle())
+        .contextMenu {
+            Button("Подзадача") { store.addSubtask(after: t.line, in: e.note.id) }
+            Button("Открыть заметку") { onReveal(e.note.id) }
+            Divider()
+            Button("Удалить", role: .destructive) {
+                store.removeItem(line: t.line, in: e.note.id)
+            }
+        }
+    }
 
-                Spacer(minLength: 0)
+    /// Срок: красный — просрочено, жёлтый — сегодня/завтра. Цвет дублируется иконкой.
+    private func dueChip(_ due: Date, _ t: ChecklistItem) -> some View {
+        let soon = t.isDueToday || Calendar.current.isDateInTomorrow(due)
+        let tint = t.isOverdue ? Theme.Accent.danger : soon ? Theme.Accent.warning : Theme.Ink.secondary
+        return Label(Note.dayLabel(due),
+                     systemImage: t.isOverdue ? "exclamationmark.circle" : "calendar")
+            .font(.system(size: 11, weight: .medium))
+            .padding(.horizontal, 7).padding(.vertical, 2)
+            .background(t.isOverdue ? Theme.Accent.danger.opacity(0.22)
+                        : soon ? Theme.Accent.warning.opacity(0.20)
+                        : Theme.Surface.field, in: Capsule())
+            .foregroundStyle(tint)
+            .help(t.isOverdue ? "Просрочено" : "Срок")
+    }
 
-                Text("\(note.todo.done)/\(note.todo.total)")
-                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+    @ViewBuilder
+    private func doneLabel(_ t: ChecklistItem) -> some View {
+        if let at = t.doneAt {
+            HStack(spacing: 4) {
+                Text("сдано " + Note.dayLabel(at))
                     .foregroundStyle(Theme.Ink.tertiary)
-            }
-
-            ForEach(items) { item in
-                HStack(spacing: Theme.Space.s) {
-                    Color.clear.frame(width: 4 + CGFloat(item.depth) * 14, height: 1)
-
-                    Button { store.toggleItem(line: item.line, in: note.id) } label: {
-                        Image(systemName: item.isDone ? "checkmark.circle.fill" : "circle")
-                            .font(Theme.Icon.check)
-                            .foregroundStyle(item.isDone ? Theme.Accent.success
-                                                         : Theme.Ink.tertiary)
-                    }
-                    .buttonStyle(.plain)
-                    .help(item.isDone ? "Снять отметку" : "Отметить сделанным")
-
-                    Text(item.text.isEmpty ? "Без названия" : item.text)
-                        .font(Theme.Font.caption)
-                        .strikethrough(item.isDone, color: Theme.Ink.tertiary)
-                        .foregroundStyle(item.isDone ? Theme.Ink.tertiary : Theme.Ink.primary)
-                        .lineLimit(1)
-
-                    Spacer(minLength: 0)
-                }
-                .padding(.horizontal, 4).padding(.vertical, 2)
-                .rowHighlight(selected: false, radius: 6)
-                .contentShape(Rectangle())
-                .contextMenu {
-                    Button("Подзадача") { store.addSubtask(after: item.line, in: note.id) }
-                    Button("Открыть заметку") { onReveal(note.id) }
-                    Divider()
-                    Button("Удалить", role: .destructive) {
-                        store.removeItem(line: item.line, in: note.id)
-                    }
+                if t.isLate {
+                    Text("с опозданием")
+                        .foregroundStyle(Theme.Accent.danger)
                 }
             }
+            .font(.system(size: 11, weight: .medium))
         }
-        .padding(.horizontal, Theme.Space.m).padding(.vertical, 8)
-        .background(Theme.Surface.base,
-                    in: RoundedRectangle(cornerRadius: Theme.Radius.card))
+    }
+
+    private func priorityGlyph(_ p: TaskPriority) -> (icon: String, tint: Color)? {
+        switch p {
+        case .high:   return ("chevron.up.2", Theme.Accent.warning)
+        case .medium: return ("chevron.up", Theme.Ink.secondary)
+        case .low:    return ("chevron.down", Theme.Ink.tertiary)
+        case .none:   return nil
+        }
     }
 
     private func quickAdd() {
