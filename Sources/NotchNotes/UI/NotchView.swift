@@ -76,52 +76,51 @@ struct NotchView: View {
     }
 
     /// Мишень для броска: появляется, когда файл поднесли к челке.
-    /// Строго внутри выреза — иконка и подпись в строку по бокам от «подбородка»,
-    /// поэтому плашка не вылезает ни под челку, ни на обои.
+    /// Иконка слева от выреза, подпись справа — ничего не заходит под камеру.
     private var dropTarget: some View {
-        HStack(spacing: 5) {
+        notchSplit(wing: vm.dropWingWidth) {
             Image(systemName: vm.isDropTargeted ? "tray.and.arrow.down.fill" : "tray.and.arrow.down")
                 .font(Theme.Icon.small)
                 .foregroundStyle(vm.isDropTargeted ? Theme.Accent.tint : Theme.Ink.primary)
-            Spacer(minLength: 0)
-            Text(dropHint)
+        } right: {
+            Text(vm.dropHint)
                 .font(Theme.Font.badge)
                 .foregroundStyle(vm.isDropTargeted ? Theme.Ink.primary : Theme.Ink.secondary)
                 .lineLimit(1)
-                .fixedSize()
         }
-        .padding(.horizontal, 9)
-        .frame(height: vm.notchSize.height)
-        .frame(maxHeight: .infinity, alignment: .top)
         .animation(Theme.motion(.easeOut(duration: 0.15)), value: vm.isDropTargeted)
-    }
-
-    /// В крыло по 60 пт помещается только короткая подпись — иначе она
-    /// потребует ширины, которой у выреза нет, и текст обрежется многоточием.
-    private var dropHint: String {
-        guard vm.isDropTargeted else { return "На полку" }
-        guard vm.dragItemCount > 1 else { return "Отпустите" }
-        return "\(vm.dragItemCount) \(filesWord(vm.dragItemCount))"
     }
 
     /// После броска панель не раскрываем — вместо этого секунда подтверждения:
     /// пользователь в этот момент работает в другом приложении.
     private var dropConfirmation: some View {
-        HStack(spacing: 5) {
+        notchSplit(wing: vm.confirmWingWidth) {
             Image(systemName: "checkmark.circle.fill")
                 .font(Theme.Icon.small)
                 .foregroundStyle(Theme.Accent.success)
-            Spacer(minLength: 0)
-            Text("\(vm.droppedCount) \(filesWord(vm.droppedCount))")
+        } right: {
+            Text(vm.dropConfirmText)
                 .font(Theme.Font.badge)
                 .foregroundStyle(Theme.Ink.primary)
                 .lineLimit(1)
-                .fixedSize()
         }
-        .padding(.horizontal, 9)
+        .transition(.opacity)
+    }
+
+    /// Крыло | физический вырез | крыло. Содержимое прижато к вырезу с зазором
+    /// 8 пт, как у ambient-крыльев: под камеру не попадает ни пиксель.
+    private func notchSplit<L: View, R: View>(wing: CGFloat,
+                                              @ViewBuilder left: () -> L,
+                                              @ViewBuilder right: () -> R) -> some View {
+        HStack(spacing: 0) {
+            Color.clear.frame(width: wing)
+                .overlay(alignment: .trailing) { left().padding(.trailing, 8) }
+            Color.clear.frame(width: vm.notchSize.width)
+            Color.clear.frame(width: wing)
+                .overlay(alignment: .leading) { right().padding(.leading, 8).padding(.trailing, 9) }
+        }
         .frame(height: vm.notchSize.height)
         .frame(maxHeight: .infinity, alignment: .top)
-        .transition(.opacity)
     }
 
     /// Свёрнутая челка в покое: два крыла по бокам от физического выреза.

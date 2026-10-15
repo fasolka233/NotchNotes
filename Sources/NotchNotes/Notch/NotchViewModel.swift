@@ -250,8 +250,8 @@ final class NotchViewModel: ObservableObject {
     /// `notchSize.height`, выезжает из-под челки на обои и читается как
     /// отдельная чёрная плашка, а не как часть выреза.
     var collapsedSize: CGSize {
-        // мишень расширяется только вбок и умеренно: вырез ~179 пт, поэтому
-        // «крыльев» по 60 пт хватает, чтобы прицелиться, и силуэт челки остаётся.
+        // мишень расширяется только вбок и умеренно: крыло ровно под подпись,
+        // поэтому прицелиться есть куда, а силуэт челки остаётся.
         if isSystemDragging || isDropTargeted {
             return CGSize(width: notchSize.width + 2 * dropWingWidth,
                           height: notchSize.height)
@@ -267,9 +267,38 @@ final class NotchViewModel: ObservableObject {
         return CGSize(width: notchSize.width + 2 * wingWidth, height: notchSize.height)
     }
 
-    /// Насколько мишень выступает за вырез с каждой стороны
-    let dropWingWidth: CGFloat = 60
-    let confirmWingWidth: CGFloat = 52
+    /// Подпись мишени: иконка — в левом крыле, эта строка — в правом
+    var dropHint: String {
+        guard isDropTargeted else { return "На полку" }
+        guard dragItemCount > 1 else { return "Отпустите" }
+        return "\(dragItemCount) \(filesWord(dragItemCount))"
+    }
+
+    var dropConfirmText: String { "\(droppedCount) \(filesWord(droppedCount))" }
+
+    /// Насколько мишень выступает за вырез с каждой стороны.
+    ///
+    /// Подпись живёт целиком в правом крыле, поэтому крыло меряем по тексту,
+    /// как и ambient: при фиксированных 60 пт «Отпустите» залезала под камеру.
+    /// Берём самую длинную из подписей этого переноса — наведение на мишень
+    /// меняет текст, но не размер. 60 пт — минимум, чтобы было куда целиться.
+    var dropWingWidth: CGFloat {
+        let widest = ["На полку", "Отпустите", "\(dragItemCount) \(filesWord(dragItemCount))"]
+            .map { textWidth($0, font: Self.hintFont) }.max() ?? 0
+        return max(60, Self.wingInnerPadding + Self.hintRimPadding + widest)
+    }
+
+    var confirmWingWidth: CGFloat {
+        max(52, Self.wingInnerPadding + Self.hintRimPadding + textWidth(dropConfirmText, font: Self.hintFont))
+    }
+
+    /// Двойник `Theme.Font.badge` для замеров подписи мишени
+    private static let hintFont: NSFont = {
+        let base = NSFont.systemFont(ofSize: 11, weight: .semibold)
+        return base.fontDescriptor.withDesign(.rounded).flatMap { NSFont(descriptor: $0, size: 11) } ?? base
+    }()
+    /// Запас на скруглённый край мишени и её рамку (2 пт при наведении)
+    static let hintRimPadding: CGFloat = 3
 
     // Крылья симметричны, поэтому каждый лишний пункт множится на два и панель
     // быстро перестаёт читаться как челка. Ширину задаёт содержимое, но сверху

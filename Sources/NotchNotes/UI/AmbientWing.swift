@@ -14,22 +14,23 @@ struct AmbientWing<Content: View>: View {
     private var isEmpty: Bool { !vm.hasBadge(side) }
 
     var body: some View {
-        content()
-            // Отступы — ВНУТРИ фиксированной ширины. Снаружи они добавляли
-            // крылу лишние пункты, сумма переставала совпадать с collapsedSize,
-            // и SwiftUI сжимал резерв под вырез: нарисованная челка становилась
-            // уже физической, а значки наползали на камеру.
-            // 8 пт у выреза — воздух вокруг камеры, 6 пт снаружи — чтобы текст
-            // не упирался в скруглённый край панели.
-            .padding(.leading, side == .left ? 6 : 8)
-            .padding(.trailing, side == .left ? 8 : 6)
+        // Ширину держит Color.clear, а не содержимое: у пустого крыла content()
+        // — это EmptyView, и SwiftUI выкидывает его из HStack вместе со всеми
+        // .padding/.frame. Крыло пропадало, HStack становился [вырез][крыло],
+        // центрировался и уезжал на полкрыла вбок — таймер заходил под камеру.
+        // Ширина одна на оба крыла — пустое остаётся пустым местом.
+        Color.clear
+            .frame(width: vm.wingWidth)
+            .frame(maxHeight: .infinity)
             // Содержимое прижимаем к вырезу: значки читаются как продолжение
             // челки, а не как две отдельные наклейки по краям экрана.
-            // Ширина одна на оба крыла — пустое остаётся пустым местом, иначе
-            // раскладка съезжает и вырез перестаёт совпадать с физическим.
-            .frame(width: vm.wingWidth,
-                   alignment: side == .left ? .trailing : .leading)
-            .frame(maxHeight: .infinity)
+            .overlay(alignment: side == .left ? .trailing : .leading) {
+                // 8 пт у выреза — воздух вокруг камеры, 6 пт снаружи — чтобы
+                // текст не упирался в скруглённый край панели.
+                content()
+                    .padding(.leading, side == .left ? 6 : 8)
+                    .padding(.trailing, side == .left ? 8 : 6)
+            }
             .contentShape(Rectangle())
             .onHover { hovering in
                 guard !isEmpty else { return }
