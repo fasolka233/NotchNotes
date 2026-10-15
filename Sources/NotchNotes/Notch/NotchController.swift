@@ -88,6 +88,12 @@ final class NotchController {
             onOpenTab: { [weak self] tab in self?.open(activate: true, tab: tab) },
             onSettings: { [weak self] in self?.onSettings?() }
         ))
+        // Размер окна задаёт только applyFrame. По умолчанию хост вешает на окно
+        // min/max/intrinsic из SwiftUI: пока крыло таймера уже выросло, а окно
+        // ещё нет, ограничения спорят с рамкой, и на macOS 26 каждый сдвиг хоста
+        // (safe area corner insets) просит новый проход Update Constraints —
+        // бесконечно, до исключения в `_postWindowNeedsUpdateConstraints`.
+        host.sizingOptions = []
         host.translatesAutoresizingMaskIntoConstraints = false
         hoverView.addSubview(host)
 
